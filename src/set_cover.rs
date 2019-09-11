@@ -104,6 +104,7 @@ pub fn greedy_set_cover(
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_set_cover() {
@@ -134,8 +135,10 @@ mod test {
                     (1, vec![0, 1], 0.4),
                     (2, vec![2, 3], 0.4)
                 ]
-            ),
-            &[1, 2]
+            )
+            .into_iter()
+            .collect::<HashSet<_>>(),
+            (1..3).collect()
         );
     }
 }

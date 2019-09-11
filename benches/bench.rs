@@ -4,24 +4,24 @@ extern crate intersect;
 
 use criterion::{black_box, Criterion};
 
-use intersect::{Cost, Index, Score, TermBag, TermMask};
+use intersect::{Cost, Index, Score, TermBitset, TermMask};
 
 pub fn optimize_query(crit: &mut Criterion, threshold: Score) {
     let query_len = 7u8;
     let unigrams = (0..query_len)
         .map(|term| {
             (
-                TermBag((1 as TermMask) << term),
+                TermBitset((1 as TermMask) << term),
                 Cost(1.0),
                 Score(term as f32),
             )
         })
         .collect::<Vec<_>>();
-    let mut bigrams: Vec<(TermBag, Cost, Score)> = Vec::new();
+    let mut bigrams: Vec<(TermBitset, Cost, Score)> = Vec::new();
     for left in 0..query_len {
         for right in (left + 1)..query_len {
             bigrams.push((
-                TermBag(((1 as TermMask) << left) | ((1 as TermMask) << right)),
+                TermBitset(((1 as TermMask) << left) | ((1 as TermMask) << right)),
                 Cost(0.4),
                 Score((left + right + 1) as f32),
             ));
@@ -30,7 +30,7 @@ pub fn optimize_query(crit: &mut Criterion, threshold: Score) {
     let index = Index::new(&vec![unigrams, bigrams]);
     crit.bench_function(
         &format!("optimize query with threshold {}", threshold.0),
-        |b| b.iter(|| black_box(index.optimize_greedy(query_len, threshold))),
+        |b| b.iter(|| black_box(index.optimize_graph(query_len, threshold))),
     );
 }
 

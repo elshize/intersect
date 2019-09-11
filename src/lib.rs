@@ -13,8 +13,11 @@
 #![allow(clippy::module_name_repetitions)]
 
 extern crate failure;
+extern crate itertools;
 extern crate num;
 extern crate ordered_float;
+#[cfg(feature = "serde")]
+extern crate serde;
 
 use std::iter::Iterator;
 use std::ops::Deref;
@@ -24,7 +27,7 @@ pub use power_set::power_set_iter;
 pub use power_set::PowerSetIter;
 
 mod term_bag;
-pub use term_bag::TermBag;
+pub use term_bag::TermBitset;
 pub use term_bag::TermMask;
 
 mod index;
@@ -32,6 +35,13 @@ pub use index::Index;
 
 mod set_cover;
 pub use set_cover::set_cover;
+
+mod graph;
+pub use graph::Degree;
+pub use graph::Edges;
+pub use graph::Graph;
+pub use graph::Layer;
+pub use graph::Layers;
 
 /// The maximum length of a query that can be used for the algorithm.
 pub const MAX_QUERY_LEN: usize = std::mem::size_of::<TermMask>() * 8 - 1;
@@ -56,6 +66,22 @@ impl std::iter::Sum<Self> for Cost {
         I: Iterator<Item = Self>,
     {
         Self(iter.map(|Self(cost)| cost).sum())
+    }
+}
+
+impl std::ops::Add for Cost {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self(self.0 + other.0)
+    }
+}
+
+impl std::ops::Sub for Cost {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        Self(self.0 - other.0)
     }
 }
 

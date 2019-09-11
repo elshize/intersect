@@ -1,11 +1,15 @@
+use crate::graph::Graph;
 use crate::power_set::power_set_iter;
 use crate::set_cover::{greedy_set_cover, set_cover};
-use crate::{Cost, Score, TermBag, MAX_LIST_COUNT};
+use crate::{Cost, Score, TermBitset, MAX_LIST_COUNT};
+use itertools::Itertools;
+use std::collections::HashSet;
+use std::iter::FromIterator;
 
 #[derive(Debug)]
 struct CandidateGraph {
-    candidates: Vec<TermBag>,
-    leaves: Vec<TermBag>,
+    candidates: Vec<TermBitset>,
+    leaves: Vec<TermBitset>,
 }
 
 impl CandidateGraph {
@@ -50,12 +54,19 @@ impl CandidateGraph {
     }
 }
 
+#[derive(Default, Debug)]
+struct Switch {
+    remove: Vec<TermBitset>,
+    insert: Vec<TermBitset>,
+    gain: Cost,
+}
+
 /// Represents a full set of available posting lists for a given query.
 pub struct Index {
     /// All available posting lists partitioned by number of terms.
     /// Each element contains a vector of posting lists of the same length,
     /// and the shorter lists always come before the longer ones.
-    pub arities: Vec<Vec<TermBag>>,
+    pub arities: Vec<Vec<TermBitset>>,
     /// An array of posting list costs. The cost of `t` is in `costs[t]`.
     pub costs: [Cost; MAX_LIST_COUNT],
     /// An array of posting list upper bounds. The bound of `t` is in `upper_bound[t]`.
@@ -64,12 +75,12 @@ pub struct Index {
 
 impl Index {
     /// Construct a new index containing the given posting lists.
-    pub fn new(posting_lists: &[Vec<(TermBag, Cost, Score)>]) -> Self {
+    pub fn new(posting_lists: &[Vec<(TermBitset, Cost, Score)>]) -> Self {
         let mut costs = [Cost::default(); MAX_LIST_COUNT];
         let mut upper_bounds = [Score::default(); MAX_LIST_COUNT];
-        let mut arities: Vec<Vec<TermBag>> = Vec::new();
+        let mut arities: Vec<Vec<TermBitset>> = Vec::new();
         for arity in posting_lists {
-            let mut bags: Vec<TermBag> = Vec::with_capacity(arity.len());
+            let mut bags: Vec<TermBitset> = Vec::with_capacity(arity.len());
             for &(terms, cost, upper_bound) in arity {
                 let idx: usize = terms.into();
                 costs[idx] = cost;
@@ -85,19 +96,23 @@ impl Index {
         }
     }
 
+    fn cost(&self, terms: TermBitset) -> Cost {
+        self.costs[terms.0 as usize]
+    }
+
     /// Select optimal set of posting lists for query execution.
-    pub fn optimize(&self, query_len: u8, threshold: Score) -> Vec<TermBag> {
-        let classes = TermBag::result_classes(query_len);
+    pub fn optimize(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
+        let classes = TermBitset::result_classes(query_len);
         let must_cover = std::iter::once(false)
             .chain(
                 classes[1..]
                     .iter()
-                    .map(|&TermBag(mask)| self.upper_bounds[mask as usize] >= threshold),
+                    .map(|&TermBitset(mask)| self.upper_bounds[mask as usize] >= threshold),
             )
             .collect::<Vec<_>>();
         let candidates = self.candidates(query_len, threshold);
         let mut min_cost = Cost(std::f32::MAX);
-        let mut min_subset: Vec<TermBag> = vec![];
+        let mut min_subset: Vec<TermBitset> = vec![];
         for candidate_subset in power_set_iter(&candidates) {
             let candidate_subset: Vec<_> = candidate_subset.cloned().collect();
             let mut covered = vec![0_u8; 2_usize.pow(u32::from(query_len))];
@@ -113,7 +128,7 @@ impl Index {
             }
             let cost = candidate_subset
                 .iter()
-                .map(|&TermBag(mask)| self.costs[mask as usize])
+                .map(|&TermBitset(mask)| self.costs[mask as usize])
                 .sum::<Cost>();
             if cost < min_cost {
                 min_cost = cost;
@@ -123,7 +138,8 @@ impl Index {
         min_subset
     }
 
-    pub fn optimize_smart(&self, query_len: u8, threshold: Score) -> Vec<TermBag> {
+    #[allow(dead_code, missing_docs)]
+    pub fn optimize_smart(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
         let candidates = self.candidate_graph(query_len, threshold);
         let solution = candidates.solve(&self);
         solution
@@ -132,13 +148,66 @@ impl Index {
             .collect()
     }
 
-    pub fn optimize_greedy(&self, query_len: u8, threshold: Score) -> Vec<TermBag> {
+    #[allow(dead_code, missing_docs)]
+    pub fn optimize_greedy(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
         let candidates = self.candidate_graph(query_len, threshold);
         let solution = candidates.solve_greedy(&self);
         solution
             .into_iter()
             .map(|set| candidates.candidates[set])
             .collect()
+    }
+
+    #[allow(dead_code, missing_docs)]
+    pub fn optimize_graph(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
+        let CandidateGraph { candidates, leaves } = self.candidate_graph(query_len, threshold);
+        let graph = Graph::from_iter(candidates.into_iter());
+        let mut solution: HashSet<TermBitset> = leaves.into_iter().collect();
+        for layer in graph.layers().rev() {
+            let switch_candidates = layer
+                .filter_map(|node| {
+                    if solution.contains(&node) {
+                        graph.parents(node)
+                    } else {
+                        None
+                    }
+                })
+                .flatten()
+                .cloned()
+                .unique()
+                .collect::<Vec<TermBitset>>();
+            let mut best_switch = Switch::default();
+            for candidate_set in power_set_iter(&switch_candidates) {
+                let insert: Vec<_> = candidate_set.cloned().collect();
+                let remove: Vec<_> = insert
+                    .iter()
+                    .flat_map(|&p| graph.children(p).unwrap_or(&[]))
+                    .filter(|n| solution.contains(n))
+                    .cloned()
+                    .unique()
+                    .collect();
+                let gain = remove.iter().map(|&ch| self.cost(ch)).sum::<Cost>()
+                    - insert.iter().map(|&ch| self.cost(ch)).sum::<Cost>();
+                if gain > best_switch.gain {
+                    best_switch = Switch {
+                        remove,
+                        insert,
+                        gain,
+                    };
+                }
+            }
+            if best_switch.gain > Cost(0_f32) {
+                for node in best_switch.remove {
+                    solution.remove(&node);
+                }
+                for node in best_switch.insert {
+                    solution.insert(node);
+                }
+            }
+        }
+        let mut solution: Vec<_> = solution.into_iter().collect();
+        solution.sort();
+        solution
     }
 
     /// Returns candidates, i.e., such posting lists that can be in an optimal solution.
@@ -155,7 +224,7 @@ impl Index {
     /// This is because these will be either covered automatically by a list from (a)
     /// or one of the list from (b) that covers a list from (a).
     #[inline]
-    fn candidates(&self, query_len: u8, threshold: Score) -> Vec<TermBag> {
+    fn candidates(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
         self.layered_candidates(query_len, threshold)
             .into_iter()
             .flatten()
@@ -163,14 +232,14 @@ impl Index {
     }
 
     #[inline]
-    fn layered_candidates(&self, query_len: u8, threshold: Score) -> Vec<Vec<TermBag>> {
-        let mut cand: Vec<Vec<TermBag>> = Vec::with_capacity(self.arities.len());
+    fn layered_candidates(&self, query_len: u8, threshold: Score) -> Vec<Vec<TermBitset>> {
+        let mut cand: Vec<Vec<TermBitset>> = Vec::with_capacity(self.arities.len());
         let mut covered = vec![0_u8; 2_usize.pow(u32::from(query_len))];
-        let classes = TermBag::result_classes(query_len);
+        let classes = TermBitset::result_classes(query_len);
         for arity in &self.arities {
-            let mut arity_cand: Vec<TermBag> = Vec::with_capacity(arity.len());
+            let mut arity_cand: Vec<TermBitset> = Vec::with_capacity(arity.len());
             for &posting_list in arity {
-                let TermBag(mask) = posting_list;
+                let TermBitset(mask) = posting_list;
                 if covered[mask as usize] == 0_u8 {
                     arity_cand.push(posting_list);
                     if self.upper_bounds[mask as usize] >= threshold {
@@ -185,14 +254,14 @@ impl Index {
 
     #[inline]
     fn candidate_graph(&self, query_len: u8, threshold: Score) -> CandidateGraph {
-        let mut cand: Vec<Vec<TermBag>> = Vec::with_capacity(self.arities.len());
-        let mut leaves: Vec<TermBag> = Vec::with_capacity(query_len.pow(2) as usize);
+        let mut cand: Vec<Vec<TermBitset>> = Vec::with_capacity(self.arities.len());
+        let mut leaves: Vec<TermBitset> = Vec::with_capacity(query_len.pow(2) as usize);
         let mut covered = vec![0_u8; 2_usize.pow(u32::from(query_len))];
-        let classes = TermBag::result_classes(query_len);
+        let classes = TermBitset::result_classes(query_len);
         for arity in &self.arities {
-            let mut arity_cand: Vec<TermBag> = Vec::with_capacity(arity.len());
+            let mut arity_cand: Vec<TermBitset> = Vec::with_capacity(arity.len());
             for &posting_list in arity {
-                let TermBag(mask) = posting_list;
+                let TermBitset(mask) = posting_list;
                 if covered[mask as usize] == 0_u8 {
                     arity_cand.push(posting_list);
                     if self.upper_bounds[mask as usize] >= threshold {
@@ -220,17 +289,20 @@ mod test {
         assert!(index.arities.is_empty());
         let index = Index::new(&[
             vec![
-                (TermBag(13), Cost(0.1), Score(0.0)),
-                (TermBag(4), Cost(1.1), Score(5.6)),
+                (TermBitset(13), Cost(0.1), Score(0.0)),
+                (TermBitset(4), Cost(1.1), Score(5.6)),
             ],
             vec![
-                (TermBag(3), Cost(4.1), Score(9.0)),
-                (TermBag(1), Cost(4.1), Score(1.6)),
+                (TermBitset(3), Cost(4.1), Score(9.0)),
+                (TermBitset(1), Cost(4.1), Score(1.6)),
             ],
         ]);
         assert_eq!(
             index.arities,
-            vec![vec![TermBag(13), TermBag(4)], vec![TermBag(3), TermBag(1)],]
+            vec![
+                vec![TermBitset(13), TermBitset(4)],
+                vec![TermBitset(3), TermBitset(1)],
+            ]
         );
         let mut expected_costs = [Cost::default(); MAX_LIST_COUNT];
         expected_costs[13] = Cost(0.1);
@@ -250,13 +322,19 @@ mod test {
     fn test_layered_candidates() {
         let query_len = 4_u8;
         let unigrams = (0..query_len)
-            .map(|term| (TermBag(1 << term), Cost::default(), Score(f32::from(term))))
+            .map(|term| {
+                (
+                    TermBitset(1 << term),
+                    Cost::default(),
+                    Score(f32::from(term)),
+                )
+            })
             .collect::<Vec<_>>();
-        let mut bigrams: Vec<(TermBag, Cost, Score)> = Vec::new();
+        let mut bigrams: Vec<(TermBitset, Cost, Score)> = Vec::new();
         for left in 0..query_len {
             for right in (left + 1)..query_len {
                 bigrams.push((
-                    TermBag((1 << left) | (1 << right)),
+                    TermBitset((1 << left) | (1 << right)),
                     Cost::default(),
                     Score(f32::from(left + right + 1)),
                 ));
@@ -268,10 +346,10 @@ mod test {
             index.layered_candidates(query_len, Score(0.0)),
             vec![
                 vec![
-                    TermBag(0b0001),
-                    TermBag(0b0010),
-                    TermBag(0b0100),
-                    TermBag(0b1000)
+                    TermBitset(0b0001),
+                    TermBitset(0b0010),
+                    TermBitset(0b0100),
+                    TermBitset(0b1000)
                 ],
                 vec![]
             ]
@@ -281,10 +359,10 @@ mod test {
             index.layered_candidates(query_len, Score(1.0)),
             vec![
                 vec![
-                    TermBag(0b0001),
-                    TermBag(0b0010),
-                    TermBag(0b0100),
-                    TermBag(0b1000),
+                    TermBitset(0b0001),
+                    TermBitset(0b0010),
+                    TermBitset(0b0100),
+                    TermBitset(0b1000),
                 ],
                 vec![]
             ]
@@ -294,12 +372,12 @@ mod test {
             index.layered_candidates(query_len, Score(2.0)),
             vec![
                 vec![
-                    TermBag(0b0001),
-                    TermBag(0b0010),
-                    TermBag(0b0100),
-                    TermBag(0b1000),
+                    TermBitset(0b0001),
+                    TermBitset(0b0010),
+                    TermBitset(0b0100),
+                    TermBitset(0b1000),
                 ],
-                vec![TermBag(0b0011)],
+                vec![TermBitset(0b0011)],
             ]
         );
     }
@@ -308,13 +386,19 @@ mod test {
     fn test_candidates() {
         let query_len = 4_u8;
         let unigrams = (0..query_len)
-            .map(|term| (TermBag(1 << term), Cost::default(), Score(f32::from(term))))
+            .map(|term| {
+                (
+                    TermBitset(1 << term),
+                    Cost::default(),
+                    Score(f32::from(term)),
+                )
+            })
             .collect::<Vec<_>>();
-        let mut bigrams: Vec<(TermBag, Cost, Score)> = Vec::new();
+        let mut bigrams: Vec<(TermBitset, Cost, Score)> = Vec::new();
         for left in 0..query_len {
             for right in (left + 1)..query_len {
                 bigrams.push((
-                    TermBag((1 << left) | (1 << right)),
+                    TermBitset((1 << left) | (1 << right)),
                     Cost::default(),
                     Score(f32::from(left + right + 1)),
                 ));
@@ -325,31 +409,31 @@ mod test {
         assert_eq!(
             index.candidates(query_len, Score(0.0)),
             vec![
-                TermBag(0b0001),
-                TermBag(0b0010),
-                TermBag(0b0100),
-                TermBag(0b1000)
+                TermBitset(0b0001),
+                TermBitset(0b0010),
+                TermBitset(0b0100),
+                TermBitset(0b1000)
             ]
         );
 
         assert_eq!(
             index.candidates(query_len, Score(1.0)),
             vec![
-                TermBag(0b0001),
-                TermBag(0b0010),
-                TermBag(0b0100),
-                TermBag(0b1000),
+                TermBitset(0b0001),
+                TermBitset(0b0010),
+                TermBitset(0b0100),
+                TermBitset(0b1000),
             ]
         );
 
         assert_eq!(
             index.candidates(query_len, Score(2.0)),
             vec![
-                TermBag(0b0001),
-                TermBag(0b0010),
-                TermBag(0b0100),
-                TermBag(0b1000),
-                TermBag(0b0011),
+                TermBitset(0b0001),
+                TermBitset(0b0010),
+                TermBitset(0b0100),
+                TermBitset(0b1000),
+                TermBitset(0b0011),
             ]
         );
     }
@@ -358,13 +442,13 @@ mod test {
     fn test_optimize() {
         let query_len = 4_u8;
         let unigrams = (0..query_len)
-            .map(|term| (TermBag(1 << term), Cost(1.0), Score(f32::from(term))))
+            .map(|term| (TermBitset(1 << term), Cost(1.0), Score(f32::from(term))))
             .collect::<Vec<_>>();
-        let mut bigrams: Vec<(TermBag, Cost, Score)> = Vec::new();
+        let mut bigrams: Vec<(TermBitset, Cost, Score)> = Vec::new();
         for left in 0..query_len {
             for right in (left + 1)..query_len {
                 bigrams.push((
-                    TermBag((1 << left) | (1 << right)),
+                    TermBitset((1 << left) | (1 << right)),
                     Cost(0.4),
                     Score(f32::from(left + right + 1)),
                 ));
@@ -375,52 +459,55 @@ mod test {
         assert_eq!(
             index.optimize(query_len, Score(0.0)),
             vec![
-                TermBag(0b0001),
-                TermBag(0b0010),
-                TermBag(0b0100),
-                TermBag(0b1000)
+                TermBitset(0b0001),
+                TermBitset(0b0010),
+                TermBitset(0b0100),
+                TermBitset(0b1000)
             ]
         );
 
         assert_eq!(
             index.optimize(query_len, Score(1.0)),
-            vec![TermBag(0b0010), TermBag(0b0100), TermBag(0b1000)]
+            vec![TermBitset(0b0010), TermBitset(0b0100), TermBitset(0b1000)]
         );
 
         assert_eq!(
             index.optimize(query_len, Score(2.0)),
-            vec![TermBag(0b0100), TermBag(0b1000), TermBag(0b0011)]
+            vec![TermBitset(0b0100), TermBitset(0b1000), TermBitset(0b0011)]
         );
 
         assert_eq!(
             index.optimize(query_len, Score(3.0)),
-            vec![TermBag(0b1000), TermBag(0b0101), TermBag(0b0110)]
+            vec![TermBitset(0b1000), TermBitset(0b0101), TermBitset(0b0110)]
         );
 
         assert_eq!(
             index.optimize(query_len, Score(4.0)),
-            vec![TermBag(0b1000), TermBag(0b0110)]
+            vec![TermBitset(0b1000), TermBitset(0b0110)]
         );
 
         assert_eq!(
             index.optimize(query_len, Score(5.0)),
-            vec![TermBag(0b1010), TermBag(0b1100)]
+            vec![TermBitset(0b1010), TermBitset(0b1100)]
         );
 
-        assert_eq!(index.optimize(query_len, Score(6.0)), vec![TermBag(0b1100)]);
+        assert_eq!(
+            index.optimize(query_len, Score(6.0)),
+            vec![TermBitset(0b1100)]
+        );
     }
 
     #[test]
     fn test_optimize_smart() {
         let query_len = 4_u8;
         let unigrams = (0..query_len)
-            .map(|term| (TermBag(1 << term), Cost(1.0), Score(f32::from(term))))
+            .map(|term| (TermBitset(1 << term), Cost(1.0), Score(f32::from(term))))
             .collect::<Vec<_>>();
-        let mut bigrams: Vec<(TermBag, Cost, Score)> = Vec::new();
+        let mut bigrams: Vec<(TermBitset, Cost, Score)> = Vec::new();
         for left in 0..query_len {
             for right in (left + 1)..query_len {
                 bigrams.push((
-                    TermBag((1 << left) | (1 << right)),
+                    TermBitset((1 << left) | (1 << right)),
                     Cost(0.4),
                     Score(f32::from(left + right + 1)),
                 ));
@@ -431,41 +518,100 @@ mod test {
         assert_eq!(
             index.optimize_smart(query_len, Score(0.0)),
             vec![
-                TermBag(0b0001),
-                TermBag(0b0010),
-                TermBag(0b0100),
-                TermBag(0b1000)
+                TermBitset(0b0001),
+                TermBitset(0b0010),
+                TermBitset(0b0100),
+                TermBitset(0b1000)
             ]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(1.0)),
-            vec![TermBag(0b0010), TermBag(0b0100), TermBag(0b1000)]
+            vec![TermBitset(0b0010), TermBitset(0b0100), TermBitset(0b1000)]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(2.0)),
-            vec![TermBag(0b0100), TermBag(0b1000), TermBag(0b0011)]
+            vec![TermBitset(0b0100), TermBitset(0b1000), TermBitset(0b0011)]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(3.0)),
-            vec![TermBag(0b1000), TermBag(0b0101), TermBag(0b0110)]
+            vec![TermBitset(0b1000), TermBitset(0b0101), TermBitset(0b0110)]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(4.0)),
-            vec![TermBag(0b1000), TermBag(0b0110)]
+            vec![TermBitset(0b1000), TermBitset(0b0110)]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(5.0)),
-            vec![TermBag(0b1010), TermBag(0b1100)]
+            vec![TermBitset(0b1010), TermBitset(0b1100)]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(6.0)),
-            vec![TermBag(0b1100)]
+            vec![TermBitset(0b1100)]
+        );
+    }
+
+    #[test]
+    fn test_optimize_graph() {
+        let query_len = 4_u8;
+        let unigrams = (0..query_len)
+            .map(|term| (TermBitset(1 << term), Cost(1.0), Score(f32::from(term))))
+            .collect::<Vec<_>>();
+        let mut bigrams: Vec<(TermBitset, Cost, Score)> = Vec::new();
+        for left in 0..query_len {
+            for right in (left + 1)..query_len {
+                bigrams.push((
+                    TermBitset((1 << left) | (1 << right)),
+                    Cost(0.4),
+                    Score(f32::from(left + right + 1)),
+                ));
+            }
+        }
+        let index = Index::new(&[unigrams, bigrams]);
+
+        assert_eq!(
+            index.optimize_graph(query_len, Score(0.0)),
+            vec![
+                TermBitset(0b0001),
+                TermBitset(0b0010),
+                TermBitset(0b0100),
+                TermBitset(0b1000)
+            ]
+        );
+
+        assert_eq!(
+            index.optimize_graph(query_len, Score(1.0)),
+            vec![TermBitset(0b0010), TermBitset(0b0100), TermBitset(0b1000)]
+        );
+
+        assert_eq!(
+            index.optimize_graph(query_len, Score(2.0)),
+            vec![TermBitset(0b0011), TermBitset(0b0100), TermBitset(0b1000)]
+        );
+
+        assert_eq!(
+            index.optimize_graph(query_len, Score(3.0)),
+            vec![TermBitset(0b0101), TermBitset(0b0110), TermBitset(0b1000)]
+        );
+
+        assert_eq!(
+            index.optimize_graph(query_len, Score(4.0)),
+            vec![TermBitset(0b0110), TermBitset(0b1000)]
+        );
+
+        assert_eq!(
+            index.optimize_graph(query_len, Score(5.0)),
+            vec![TermBitset(0b1010), TermBitset(0b1100)]
+        );
+
+        assert_eq!(
+            index.optimize_graph(query_len, Score(6.0)),
+            vec![TermBitset(0b1100)]
         );
     }
 }

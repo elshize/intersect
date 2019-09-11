@@ -1,4 +1,6 @@
 use crate::{Query, Term};
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// The underlying type of the mask used by the term bag.
@@ -8,16 +10,17 @@ use std::collections::HashMap;
 pub type TermMask = u8;
 
 /// A bitset representation of a subset of terms in a query.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TermBag(pub TermMask);
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct TermBitset(pub TermMask);
 
-impl Into<usize> for TermBag {
+impl Into<usize> for TermBitset {
     fn into(self) -> usize {
         self.0 as usize
     }
 }
 
-impl TermBag {
+impl TermBitset {
     /// Constructs a term bag from a query and a subset of query terms.
     pub fn from(query: &Query, term_subset: &[Term]) -> Self {
         let mut mask: TermMask = 0;
@@ -64,72 +67,72 @@ mod test {
     #[should_panic]
     fn test_new_term_vec_wrong_id() {
         let query = Query::new(vec![Term(0), Term(7), Term(1)]);
-        TermBag::from(&query, &[Term(2)]);
+        TermBitset::from(&query, &[Term(2)]);
     }
 
     #[test]
     fn test_new_term_vec() {
         let query = Query::new(vec![Term(0), Term(7), Term(1)]);
-        assert_eq!(TermBag::from(&query, &[Term(0)]).0, 1);
-        assert_eq!(TermBag::from(&query, &[Term(7)]).0, 2);
-        assert_eq!(TermBag::from(&query, &[Term(1)]).0, 4);
-        assert_eq!(TermBag::from(&query, &[Term(1), Term(7)]).0, 6);
-        assert_eq!(TermBag::from(&query, &[Term(0), Term(1), Term(7)]).0, 7);
+        assert_eq!(TermBitset::from(&query, &[Term(0)]).0, 1);
+        assert_eq!(TermBitset::from(&query, &[Term(7)]).0, 2);
+        assert_eq!(TermBitset::from(&query, &[Term(1)]).0, 4);
+        assert_eq!(TermBitset::from(&query, &[Term(1), Term(7)]).0, 6);
+        assert_eq!(TermBitset::from(&query, &[Term(0), Term(1), Term(7)]).0, 7);
     }
 
     #[test]
     fn test_covers_all() {
         let query = Query::new(vec![Term(0), Term(1), Term(2)]);
-        let inter = TermBag::from(&query, &[Term(1), Term(2)]);
-        assert!(inter.covers(TermBag::from(&query, &[Term(1), Term(2)])));
-        assert!(!inter.covers(TermBag::from(&query, &[Term(0), Term(2)])));
+        let inter = TermBitset::from(&query, &[Term(1), Term(2)]);
+        assert!(inter.covers(TermBitset::from(&query, &[Term(1), Term(2)])));
+        assert!(!inter.covers(TermBitset::from(&query, &[Term(0), Term(2)])));
     }
 
     #[test]
     fn test_covers() {
-        assert!(!TermBag(1).covers(TermBag(2)));
-        assert!(TermBag(1).covers(TermBag(3)));
-        assert!(TermBag(2).covers(TermBag(3)));
+        assert!(!TermBitset(1).covers(TermBitset(2)));
+        assert!(TermBitset(1).covers(TermBitset(3)));
+        assert!(TermBitset(2).covers(TermBitset(3)));
 
         let query = Query::new(vec![Term(0), Term(1), Term(2)]);
-        let inter = TermBag::from(&query, &[Term(1), Term(2)]);
-        assert!(inter.covers(TermBag::from(&query, &[Term(1), Term(2)])));
-        assert!(!inter.covers(TermBag::from(&query, &[Term(0), Term(2)])));
+        let inter = TermBitset::from(&query, &[Term(1), Term(2)]);
+        assert!(inter.covers(TermBitset::from(&query, &[Term(1), Term(2)])));
+        assert!(!inter.covers(TermBitset::from(&query, &[Term(0), Term(2)])));
     }
 
     #[test]
     fn test_into_usize() {
-        let n: usize = TermBag(7).into();
+        let n: usize = TermBitset(7).into();
         assert_eq!(n, 7);
     }
 
     #[test]
     fn test_result_classes() {
         assert_eq!(
-            TermBag::result_classes(3),
+            TermBitset::result_classes(3),
             vec![
-                TermBag(0b000),
-                TermBag(0b001),
-                TermBag(0b010),
-                TermBag(0b011),
-                TermBag(0b100),
-                TermBag(0b101),
-                TermBag(0b110),
-                TermBag(0b111),
+                TermBitset(0b000),
+                TermBitset(0b001),
+                TermBitset(0b010),
+                TermBitset(0b011),
+                TermBitset(0b100),
+                TermBitset(0b101),
+                TermBitset(0b110),
+                TermBitset(0b111),
             ]
         );
     }
 
     #[test]
     fn test_cover() {
-        let classes: Vec<_> = (0..8).map(TermBag).collect();
+        let classes: Vec<_> = (0..8).map(TermBitset).collect();
 
         let mut covered = [0_u8; 8];
-        TermBag(0b101).cover(&classes, &mut covered);
+        TermBitset(0b101).cover(&classes, &mut covered);
         assert_eq!(covered, [0, 0, 0, 0, 0, 1, 0, 1]);
 
         covered = [0_u8; 8];
-        TermBag(0b10).cover(&classes, &mut covered);
+        TermBitset(0b10).cover(&classes, &mut covered);
         assert_eq!(covered, [0, 0, 1, 1, 0, 0, 1, 1]);
     }
 }
