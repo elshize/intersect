@@ -1,3 +1,11 @@
+//! In this module, we consider graphs formed by posting list intersections.
+//!
+//! The graph consists of layers of nodes (intersections) of certain
+//! [`Degree`s](struct.Degree.html).
+//! There is an edge between an intersection `n` of degree `d` and an intersection `m`
+//! of degree `d + 1` if `n` covers `m`, or (another way of looking at it)
+//! `m` contains all of the terms of `n` (and one additional term).
+
 use crate::{TermBitset, TermMask};
 use failure::{format_err, Error};
 use num::cast::ToPrimitive;
@@ -9,6 +17,8 @@ use std::convert::TryInto;
 use std::iter::FromIterator;
 
 /// Type-safe representation of an n-gram degree.
+///
+/// E.g., an intersection of 3 terms is of degree 3, while a single posting list is of degree 1.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Degree(pub u8);
@@ -25,7 +35,7 @@ impl TryFrom<u32> for Degree {
     }
 }
 
-/// Trait representing a graph formed by posting lists.
+/// Represents a graph formed by posting lists. See [`graph`](index.html) module.
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Graph {
@@ -53,15 +63,15 @@ impl FromIterator<TermBitset> for Graph {
 
 impl Graph {
     /// Constructs a full graph having all n-grams up to a given degree.
-    pub fn full(nterms: u8, degree: Degree) -> Result<Self, Error> {
-        let Degree(degree) = degree;
-        if degree > nterms {
+    pub fn full(nterms: u8, max_degree: Degree) -> Result<Self, Error> {
+        let Degree(max_degree) = max_degree;
+        if max_degree > nterms {
             return Err(format_err!("Degree must be at most number of terms"));
         }
         let two: TermMask = 2;
         Ok(Self::from_iter((1..two.pow(u32::from(nterms))).filter_map(
             |mask| {
-                if mask.count_ones() > u32::from(degree) {
+                if mask.count_ones() > u32::from(max_degree) {
                     None
                 } else {
                     Some(TermBitset(mask))
@@ -70,7 +80,7 @@ impl Graph {
         )))
     }
 
-    /// Constructs a full graph having all n-grams up to a given degree.
+    /// Constructs a graph by connecting neighboring layers in the given vector.
     pub fn from_nodes(mut nodes: Vec<Vec<TermBitset>>) -> Self {
         let &TermBitset(max_node) = nodes.iter().flatten().max().unwrap_or(&TermBitset(0));
         nodes.iter_mut().for_each(|v| v.sort());
@@ -113,6 +123,25 @@ impl Graph {
 
     /// Returns an iterator over all nodes of a certain degree.
     /// For example, `layer(1)` will return unigrams, while `layer(2)` -- bigrams.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use intersect::graph::{Degree, Graph};
+    /// # use intersect::TermBitset;
+    /// # fn main() -> Result<(), failure::Error> {
+    /// let graph = Graph::full(3, Degree(3))?;
+    /// // Layer of degree 0 is always empty.
+    /// assert!(graph.layer(Degree(0)).collect::<Vec<_>>().is_empty());
+    /// assert_eq!(
+    ///     graph.layer(Degree(2)).collect::<Vec<_>>(),
+    ///     vec![TermBitset(0b011), TermBitset(0b101), TermBitset(0b110)]
+    /// );
+    /// // Any layer above the maximum degree will be empty.
+    /// assert!(graph.layer(Degree(4)).collect::<Vec<_>>().is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn layer(&self, degree: Degree) -> Layer {
         Layer {
             iter: self.nodes.get(degree.0 as usize).map(|v| v.iter()),
@@ -153,7 +182,7 @@ impl Graph {
         self.children.get(terms.0 as usize).map(|v| &v[..])
     }
 
-    /// An iterator over all edges: parents (if any) following by children (if any)
+    /// An iterator over all edges: parents (if any) following by children (if any).
     pub fn edges(&self, term: TermBitset) -> Edges {
         Edges {
             iter: self
@@ -165,7 +194,8 @@ impl Graph {
     }
 }
 
-/// Iterator over nodes in a single layer of a graph.
+/// Iterator over nodes in a single layer of a graph. The return type of
+/// [`layer`](struct.Graph.html#method.layer).
 pub struct Layer<'a> {
     iter: Option<std::slice::Iter<'a, TermBitset>>,
 }
@@ -178,7 +208,8 @@ impl<'a> Iterator for Layer<'a> {
     }
 }
 
-/// Iterator over layers of a graph.
+/// Iterator over layers of a graph. The return type of
+/// [`layers`](struct.Graph.html#method.layers).
 pub struct Layers<'a> {
     iter: std::slice::Iter<'a, Vec<TermBitset>>,
 }
@@ -201,7 +232,8 @@ impl<'a> DoubleEndedIterator for Layers<'a> {
     }
 }
 
-/// Iterator over all edges of a node (both parents and children).
+/// Iterator over all edges of a node (both parents and children). The return type of
+/// [`edges`](struct.Graph.html#method.edges).
 pub struct Edges<'a> {
     iter: std::iter::Chain<std::slice::Iter<'a, TermBitset>, std::slice::Iter<'a, TermBitset>>,
 }

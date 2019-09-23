@@ -4,9 +4,9 @@ extern crate intersect;
 
 use criterion::{black_box, Criterion};
 
-use intersect::{Cost, Index, Score, TermBitset, TermMask};
+use intersect::{Cost, Index, OptimizeMethod, Score, TermBitset, TermMask};
 
-pub fn optimize_query(crit: &mut Criterion, threshold: Score) {
+pub fn optimize_query(crit: &mut Criterion, threshold: Score, method: OptimizeMethod) {
     let query_len = 7u8;
     let unigrams = (0..query_len)
         .map(|term| {
@@ -30,46 +30,46 @@ pub fn optimize_query(crit: &mut Criterion, threshold: Score) {
     let index = Index::new(&vec![unigrams, bigrams]);
     crit.bench_function(
         &format!("optimize query with threshold {}", threshold.0),
-        |b| b.iter(|| black_box(index.optimize_graph(query_len, threshold))),
+        |b| b.iter(|| black_box(index.optimize(query_len, threshold, method))),
     );
 }
 
-pub fn optimize_query_0(crit: &mut Criterion) {
-    optimize_query(crit, Score(0f32))
+pub fn opt_graph_0(crit: &mut Criterion) {
+    optimize_query(crit, Score(0f32), OptimizeMethod::Graph)
 }
 
-pub fn optimize_query_1(crit: &mut Criterion) {
-    optimize_query(crit, Score(1f32))
+pub fn opt_graph_1(crit: &mut Criterion) {
+    optimize_query(crit, Score(1f32), OptimizeMethod::Graph)
 }
 
-pub fn optimize_query_2(crit: &mut Criterion) {
-    optimize_query(crit, Score(2f32))
+pub fn opt_graph_2(crit: &mut Criterion) {
+    optimize_query(crit, Score(2f32), OptimizeMethod::Graph)
 }
 
-pub fn optimize_query_3(crit: &mut Criterion) {
-    optimize_query(crit, Score(3f32))
+pub fn opt_graph_3(crit: &mut Criterion) {
+    optimize_query(crit, Score(3f32), OptimizeMethod::Graph)
 }
 
-pub fn optimize_query_4(crit: &mut Criterion) {
-    optimize_query(crit, Score(4f32))
+pub fn opt_graph_4(crit: &mut Criterion) {
+    optimize_query(crit, Score(4f32), OptimizeMethod::Graph)
 }
 
-pub fn optimize_query_5(crit: &mut Criterion) {
-    optimize_query(crit, Score(5f32))
+pub fn opt_graph_5(crit: &mut Criterion) {
+    optimize_query(crit, Score(5f32), OptimizeMethod::Graph)
 }
 
-pub fn optimize_query_6(crit: &mut Criterion) {
-    optimize_query(crit, Score(6f32))
+pub fn opt_graph_6(crit: &mut Criterion) {
+    optimize_query(crit, Score(6f32), OptimizeMethod::Graph)
 }
 
 criterion_group!(
     benches,
-    optimize_query_0,
-    optimize_query_1,
-    optimize_query_2,
-    optimize_query_3,
-    optimize_query_4,
-    optimize_query_5,
-    optimize_query_6,
+    opt_graph_0,
+    opt_graph_1,
+    opt_graph_2,
+    opt_graph_3,
+    opt_graph_4,
+    opt_graph_5,
+    opt_graph_6,
 );
 criterion_main!(benches);

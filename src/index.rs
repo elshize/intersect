@@ -66,11 +66,30 @@ pub struct Index {
     /// All available posting lists partitioned by number of terms.
     /// Each element contains a vector of posting lists of the same length,
     /// and the shorter lists always come before the longer ones.
-    pub arities: Vec<Vec<TermBitset>>,
+    pub degrees: Vec<Vec<TermBitset>>,
     /// An array of posting list costs. The cost of `t` is in `costs[t]`.
     pub costs: [Cost; MAX_LIST_COUNT],
     /// An array of posting list upper bounds. The bound of `t` is in `upper_bound[t]`.
     pub upper_bounds: [Score; MAX_LIST_COUNT],
+}
+
+/// Method of selecting optimal set of intersections.
+#[derive(Debug, Clone, Copy)]
+pub enum OptimizeMethod {
+    /// Brute-force method calculating exactly all possible subsets.
+    /// Very slow on anything non-trivial.
+    BruteForce,
+    /// Returns the result equivalent to `BruteForce` but limits the number
+    /// of possible candidates significantly.
+    /// Faster than `BruteForce` but still very slow on longer queries.
+    Exact,
+    /// This is essentially a greedy approximation algorithm for weighted set cover.
+    /// The result is approximate but this method is very fast.
+    Greedy,
+    /// Another approximate solution that has potential of being more accurate
+    /// than `Greedy` (to be determined) but not as fast.
+    /// Still, is reasonably fast if yields better results.
+    Graph,
 }
 
 impl Index {
@@ -78,7 +97,7 @@ impl Index {
     pub fn new(posting_lists: &[Vec<(TermBitset, Cost, Score)>]) -> Self {
         let mut costs = [Cost::default(); MAX_LIST_COUNT];
         let mut upper_bounds = [Score::default(); MAX_LIST_COUNT];
-        let mut arities: Vec<Vec<TermBitset>> = Vec::new();
+        let mut degrees: Vec<Vec<TermBitset>> = Vec::new();
         for arity in posting_lists {
             let mut bags: Vec<TermBitset> = Vec::with_capacity(arity.len());
             for &(terms, cost, upper_bound) in arity {
@@ -87,10 +106,10 @@ impl Index {
                 upper_bounds[idx] = upper_bound;
                 bags.push(terms);
             }
-            arities.push(bags);
+            degrees.push(bags);
         }
         Self {
-            arities,
+            degrees,
             costs,
             upper_bounds,
         }
@@ -101,7 +120,21 @@ impl Index {
     }
 
     /// Select optimal set of posting lists for query execution.
-    pub fn optimize(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
+    pub fn optimize(
+        &self,
+        query_len: u8,
+        threshold: Score,
+        method: OptimizeMethod,
+    ) -> Vec<TermBitset> {
+        match method {
+            OptimizeMethod::BruteForce => self.optimize_brute_force(query_len, threshold),
+            OptimizeMethod::Exact => self.optimize_smart(query_len, threshold),
+            OptimizeMethod::Greedy => self.optimize_greedy(query_len, threshold),
+            OptimizeMethod::Graph => self.optimize_graph(query_len, threshold),
+        }
+    }
+
+    fn optimize_brute_force(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
         let classes = TermBitset::result_classes(query_len);
         let must_cover = std::iter::once(false)
             .chain(
@@ -138,8 +171,7 @@ impl Index {
         min_subset
     }
 
-    #[allow(dead_code, missing_docs)]
-    pub fn optimize_smart(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
+    fn optimize_smart(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
         let candidates = self.candidate_graph(query_len, threshold);
         let solution = candidates.solve(&self);
         solution
@@ -148,8 +180,7 @@ impl Index {
             .collect()
     }
 
-    #[allow(dead_code, missing_docs)]
-    pub fn optimize_greedy(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
+    fn optimize_greedy(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
         let candidates = self.candidate_graph(query_len, threshold);
         let solution = candidates.solve_greedy(&self);
         solution
@@ -158,8 +189,7 @@ impl Index {
             .collect()
     }
 
-    #[allow(dead_code, missing_docs)]
-    pub fn optimize_graph(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
+    fn optimize_graph(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
         let CandidateGraph { candidates, leaves } = self.candidate_graph(query_len, threshold);
         let graph = Graph::from_iter(candidates.into_iter());
         let mut solution: HashSet<TermBitset> = leaves.into_iter().collect();
@@ -233,10 +263,10 @@ impl Index {
 
     #[inline]
     fn layered_candidates(&self, query_len: u8, threshold: Score) -> Vec<Vec<TermBitset>> {
-        let mut cand: Vec<Vec<TermBitset>> = Vec::with_capacity(self.arities.len());
+        let mut cand: Vec<Vec<TermBitset>> = Vec::with_capacity(self.degrees.len());
         let mut covered = vec![0_u8; 2_usize.pow(u32::from(query_len))];
         let classes = TermBitset::result_classes(query_len);
-        for arity in &self.arities {
+        for arity in &self.degrees {
             let mut arity_cand: Vec<TermBitset> = Vec::with_capacity(arity.len());
             for &posting_list in arity {
                 let TermBitset(mask) = posting_list;
@@ -254,11 +284,11 @@ impl Index {
 
     #[inline]
     fn candidate_graph(&self, query_len: u8, threshold: Score) -> CandidateGraph {
-        let mut cand: Vec<Vec<TermBitset>> = Vec::with_capacity(self.arities.len());
+        let mut cand: Vec<Vec<TermBitset>> = Vec::with_capacity(self.degrees.len());
         let mut leaves: Vec<TermBitset> = Vec::with_capacity(query_len.pow(2) as usize);
         let mut covered = vec![0_u8; 2_usize.pow(u32::from(query_len))];
         let classes = TermBitset::result_classes(query_len);
-        for arity in &self.arities {
+        for arity in &self.degrees {
             let mut arity_cand: Vec<TermBitset> = Vec::with_capacity(arity.len());
             for &posting_list in arity {
                 let TermBitset(mask) = posting_list;
@@ -282,11 +312,12 @@ impl Index {
 #[cfg(test)]
 mod test {
     use super::*;
+    use OptimizeMethod::BruteForce;
 
     #[test]
     fn test_new_index() {
         let index = Index::new(&[]);
-        assert!(index.arities.is_empty());
+        assert!(index.degrees.is_empty());
         let index = Index::new(&[
             vec![
                 (TermBitset(13), Cost(0.1), Score(0.0)),
@@ -298,7 +329,7 @@ mod test {
             ],
         ]);
         assert_eq!(
-            index.arities,
+            index.degrees,
             vec![
                 vec![TermBitset(13), TermBitset(4)],
                 vec![TermBitset(3), TermBitset(1)],
@@ -439,7 +470,7 @@ mod test {
     }
 
     #[test]
-    fn test_optimize() {
+    fn test_optimize_brute_force() {
         let query_len = 4_u8;
         let unigrams = (0..query_len)
             .map(|term| (TermBitset(1 << term), Cost(1.0), Score(f32::from(term))))
@@ -457,7 +488,7 @@ mod test {
         let index = Index::new(&[unigrams, bigrams]);
 
         assert_eq!(
-            index.optimize(query_len, Score(0.0)),
+            index.optimize(query_len, Score(0.0), BruteForce),
             vec![
                 TermBitset(0b0001),
                 TermBitset(0b0010),
@@ -467,32 +498,32 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(1.0)),
+            index.optimize(query_len, Score(1.0), BruteForce),
             vec![TermBitset(0b0010), TermBitset(0b0100), TermBitset(0b1000)]
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(2.0)),
+            index.optimize(query_len, Score(2.0), BruteForce),
             vec![TermBitset(0b0100), TermBitset(0b1000), TermBitset(0b0011)]
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(3.0)),
+            index.optimize(query_len, Score(3.0), BruteForce),
             vec![TermBitset(0b1000), TermBitset(0b0101), TermBitset(0b0110)]
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(4.0)),
+            index.optimize(query_len, Score(4.0), BruteForce),
             vec![TermBitset(0b1000), TermBitset(0b0110)]
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(5.0)),
+            index.optimize(query_len, Score(5.0), BruteForce),
             vec![TermBitset(0b1010), TermBitset(0b1100)]
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(6.0)),
+            index.optimize(query_len, Score(6.0), BruteForce),
             vec![TermBitset(0b1100)]
         );
     }

@@ -12,36 +12,23 @@
 #![deny(clippy::all, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
-extern crate failure;
-extern crate itertools;
-extern crate num;
-extern crate ordered_float;
-#[cfg(feature = "serde")]
-extern crate serde;
-
 use std::iter::Iterator;
 use std::ops::Deref;
 
 mod power_set;
-pub use power_set::power_set_iter;
-pub use power_set::PowerSetIter;
+pub use power_set::{power_set_iter, PowerSetIter};
 
-mod term_bag;
-pub use term_bag::TermBitset;
-pub use term_bag::TermMask;
+mod term_bitset;
+pub use term_bitset::{TermBitset, TermMask};
 
 mod index;
-pub use index::Index;
+pub use index::{Index, OptimizeMethod};
 
 mod set_cover;
 pub use set_cover::set_cover;
 
-mod graph;
-pub use graph::Degree;
-pub use graph::Edges;
+pub mod graph;
 pub use graph::Graph;
-pub use graph::Layer;
-pub use graph::Layers;
 
 /// The maximum length of a query that can be used for the algorithm.
 pub const MAX_QUERY_LEN: usize = std::mem::size_of::<TermMask>() * 8 - 1;
@@ -52,11 +39,11 @@ pub const MAX_LIST_COUNT: usize = 1_usize << MAX_QUERY_LEN;
 
 const QUERY_LEN_EXCEEDED: &str = &"Max query len exceeded";
 
-/// Term representation
+/// Numerical term representation.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct Term(pub u32);
 
-/// Cost representation
+/// Represents a cost of processing a certain intersection of terms.
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
 pub struct Cost(pub f32);
 
