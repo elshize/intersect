@@ -1,5 +1,5 @@
 use crate::{Query, Term};
-use failure::ResultExt;
+use failure::{format_err, Error, ResultExt};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,86 +11,118 @@ use std::str::FromStr;
 /// is equal to 1 if it's present, and 0 if it's missing.
 pub type TermMask = u8;
 
-/// A bitset representation of a subset of terms in a query.
+fn term_mask_from_query(query: &Query, term_subset: &[Term]) -> Result<TermMask, Error> {
+    let mut mask: TermMask = 0;
+    let mut mapping = HashMap::<Term, usize>::new();
+    for (idx, &term) in query.terms.iter().enumerate() {
+        mapping.insert(term, idx);
+    }
+    for term in term_subset.iter() {
+        let idx = mapping
+            .get(term)
+            .ok_or_else(|| format_err!("Term not in query."))?;
+        let one: TermMask = 1;
+        mask |= one << idx;
+    }
+    Ok(mask)
+}
+
+fn term_mask_from_str(index: &str) -> Result<TermMask, Error> {
+    let num = u8::from_str_radix(index, 2)
+        .with_context(|_| format!("Invalid bitset string: {}", index))?;
+    Ok(num)
+}
+
+/// Represents a class of results having all terms marked as 1 but no terms marked as 0.
 ///
-/// For example, given a three-term query, `TermBitset(0b001)` represents a single posting list
-/// of the first term, while `TermBitset(0b101)` represents the intersection of the first and
-/// the last term.
+/// Given a query, all possible resulting documents can be partitioned into
+/// a number of disjoint classes defined by the terms they contain (exclusively).
+/// For example, in a 3-term query, the class `100` includes all documents containing
+/// **only** the first term, while the class `111` includes the documents containing
+/// all three terms.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct TermBitset(pub TermMask);
+pub struct ResultClass(pub TermMask);
 
-impl Into<usize> for TermBitset {
+impl FromStr for ResultClass {
+    type Err = Error;
+    fn from_str(index: &str) -> Result<Self, Self::Err> {
+        term_mask_from_str(index).map(Self)
+    }
+}
+
+impl Into<usize> for ResultClass {
     fn into(self) -> usize {
         self.0 as usize
     }
 }
 
-impl TermBitset {
-    /// Constructs a term bag from a query and a subset of query terms.
-    pub fn from(query: &Query, term_subset: &[Term]) -> Self {
-        let mut mask: TermMask = 0;
-        let mut mapping = HashMap::<Term, usize>::new();
-        for (idx, &term) in query.terms.iter().enumerate() {
-            mapping.insert(term, idx);
-        }
-        for term in term_subset.iter() {
-            let idx = mapping.get(term).expect("Term not in query.");
-            let one: TermMask = 1;
-            mask |= one << idx;
-        }
-        Self(mask)
-    }
-
-    /// Generates all possible result classes for this term bag.
+impl ResultClass {
+    /// Generates all possible result classes for this query length.
     ///
     /// Essentially, it generates a vector of values from 0 to `2^len`.
-    pub fn result_classes(len: u8) -> Vec<Self> {
+    pub fn generate(len: u8) -> Vec<Self> {
         let two: TermMask = 2;
         (0..two.pow(u32::from(len))).map(Self).collect()
     }
 
-    /// Checks if this term mag covers a given result class.
-    #[inline]
-    pub fn covers(self, class: Self) -> bool {
-        self.0 & class.0 == self.0
-    }
-
-    /// Marks classes that this term bag covers as covered.
-    #[inline]
-    pub fn cover(self, classes: &[Self], covered: &mut [u8]) {
-        for (covered, &class) in covered.iter_mut().zip(classes) {
-            *covered |= self.covers(class) as u8;
-        }
-    }
-
-    /// Number of terms in the set.
+    /// Number of terms in this class.
     #[inline]
     pub fn degree(self) -> u32 {
         self.0.count_ones()
     }
 }
 
-impl FromStr for TermBitset {
-    type Err = failure::Error;
+/// Represents a posting list of a single term, if only one `1` is present,
+/// or an intersection of multiple terms.
+///
+/// Although intersection are in a close relation with [`ResultClass`](#structs.ResultClass)
+/// objects, there is an important distinction.
+/// A result class is an abstract and implicit object, while intersections are provided
+/// explicitly by the user.
+/// The relations between result classes and intersections are not symmetric,
+/// hence different type to avoid mistakes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct Intersection(pub TermMask);
 
-    /// Parses a text binary representation.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use intersect::TermBitset;
-    /// # fn main() -> Result<(), failure::Error> {
-    /// let tb: TermBitset = "01010".parse()?;
-    /// assert_eq!(tb, TermBitset(0b1010));
-    /// assert!("0x21".parse::<TermBitset>().is_err());
-    /// # Ok(())
-    /// # }
-    /// ```
+impl FromStr for Intersection {
+    type Err = Error;
     fn from_str(index: &str) -> Result<Self, Self::Err> {
-        Ok(Self(u8::from_str_radix(index, 2).with_context(|_| {
-            format!("Invalid bitset string: {}", index)
-        })?))
+        term_mask_from_str(index).map(Self)
+    }
+}
+
+impl Into<usize> for Intersection {
+    fn into(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl Intersection {
+    /// Constructs an intersection struct from a query and a subset of query terms.
+    pub fn from(query: &Query, term_subset: &[Term]) -> Result<Self, Error> {
+        term_mask_from_query(query, term_subset).map(Self)
+    }
+
+    /// Checks if this intersection covers a given result class.
+    #[inline]
+    pub fn covers(self, class: ResultClass) -> bool {
+        self.0 & class.0 == self.0
+    }
+
+    /// Marks classes that this intersection covers.
+    #[inline]
+    pub fn cover(self, classes: &[ResultClass], covered: &mut [u8]) {
+        for (covered, &class) in covered.iter_mut().zip(classes) {
+            *covered |= self.covers(class) as u8;
+        }
+    }
+
+    /// Number of terms in the intersection.
+    #[inline]
+    pub fn degree(self) -> u32 {
+        self.0.count_ones()
     }
 }
 
@@ -100,81 +132,87 @@ mod test {
 
     #[test]
     fn test_from_str() {
-        let tb: TermBitset = "01010".parse().unwrap();
-        assert_eq!(tb, TermBitset(0b1010));
-        assert!("0x21".parse::<TermBitset>().is_err());
+        let inter: Intersection = "01010".parse().unwrap();
+        assert_eq!(inter, Intersection(0b1010));
+        assert!("0x21".parse::<Intersection>().is_err());
+
+        let class: ResultClass = "01010".parse().unwrap();
+        assert_eq!(class, ResultClass(0b1010));
+        assert!("0x21".parse::<ResultClass>().is_err());
     }
 
     #[test]
-    #[should_panic]
     fn test_new_term_vec_wrong_id() {
         let query = Query::new(vec![Term(0), Term(7), Term(1)]);
-        TermBitset::from(&query, &[Term(2)]);
+        assert!(Intersection::from(&query, &[Term(2)]).is_err());
     }
 
     #[test]
     fn test_new_term_vec() {
         let query = Query::new(vec![Term(0), Term(7), Term(1)]);
-        assert_eq!(TermBitset::from(&query, &[Term(0)]).0, 1);
-        assert_eq!(TermBitset::from(&query, &[Term(7)]).0, 2);
-        assert_eq!(TermBitset::from(&query, &[Term(1)]).0, 4);
-        assert_eq!(TermBitset::from(&query, &[Term(1), Term(7)]).0, 6);
-        assert_eq!(TermBitset::from(&query, &[Term(0), Term(1), Term(7)]).0, 7);
-    }
-
-    #[test]
-    fn test_covers_all() {
-        let query = Query::new(vec![Term(0), Term(1), Term(2)]);
-        let inter = TermBitset::from(&query, &[Term(1), Term(2)]);
-        assert!(inter.covers(TermBitset::from(&query, &[Term(1), Term(2)])));
-        assert!(!inter.covers(TermBitset::from(&query, &[Term(0), Term(2)])));
+        assert_eq!(Intersection::from(&query, &[Term(0)]).unwrap().0, 1);
+        assert_eq!(Intersection::from(&query, &[Term(7)]).unwrap().0, 2);
+        assert_eq!(Intersection::from(&query, &[Term(1)]).unwrap().0, 4);
+        assert_eq!(
+            Intersection::from(&query, &[Term(1), Term(7)]).unwrap().0,
+            6
+        );
+        assert_eq!(
+            Intersection::from(&query, &[Term(0), Term(1), Term(7)])
+                .unwrap()
+                .0,
+            7
+        );
     }
 
     #[test]
     fn test_covers() {
-        assert!(!TermBitset(1).covers(TermBitset(2)));
-        assert!(TermBitset(1).covers(TermBitset(3)));
-        assert!(TermBitset(2).covers(TermBitset(3)));
+        assert!(!Intersection(1).covers(ResultClass(0b10)));
+        assert!(Intersection(1).covers(ResultClass(0b11)));
+        assert!(Intersection(0b10).covers(ResultClass(0b11)));
 
         let query = Query::new(vec![Term(0), Term(1), Term(2)]);
-        let inter = TermBitset::from(&query, &[Term(1), Term(2)]);
-        assert!(inter.covers(TermBitset::from(&query, &[Term(1), Term(2)])));
-        assert!(!inter.covers(TermBitset::from(&query, &[Term(0), Term(2)])));
+        let inter = Intersection::from(&query, &[Term(1), Term(2)]).unwrap();
+        assert!(inter.covers(ResultClass(0b110)));
+        assert!(!inter.covers(ResultClass(0b101)));
     }
 
     #[test]
     fn test_into_usize() {
-        let n: usize = TermBitset(7).into();
+        let n: usize = Intersection(7).into();
         assert_eq!(n, 7);
+        let m: usize = ResultClass(6).into();
+        assert_eq!(m, 6);
     }
 
     #[test]
     fn test_result_classes() {
         assert_eq!(
-            TermBitset::result_classes(3),
+            ResultClass::generate(3),
             vec![
-                TermBitset(0b000),
-                TermBitset(0b001),
-                TermBitset(0b010),
-                TermBitset(0b011),
-                TermBitset(0b100),
-                TermBitset(0b101),
-                TermBitset(0b110),
-                TermBitset(0b111),
+                ResultClass(0b000),
+                ResultClass(0b001),
+                ResultClass(0b010),
+                ResultClass(0b011),
+                ResultClass(0b100),
+                ResultClass(0b101),
+                ResultClass(0b110),
+                ResultClass(0b111),
             ]
         );
     }
 
     #[test]
     fn test_cover() {
-        let classes: Vec<_> = (0..8).map(TermBitset).collect();
+        // let classes: Vec<_> = (0..8).map(ResultClass).collect();
+        let classes: Vec<_> = ResultClass::generate(3);
 
         let mut covered = [0_u8; 8];
-        TermBitset(0b101).cover(&classes, &mut covered);
+        Intersection(0b101).cover(&classes, &mut covered);
         assert_eq!(covered, [0, 0, 0, 0, 0, 1, 0, 1]);
 
         covered = [0_u8; 8];
-        TermBitset(0b10).cover(&classes, &mut covered);
+        Intersection(0b10).cover(&classes, &mut covered);
         assert_eq!(covered, [0, 0, 1, 1, 0, 0, 1, 1]);
     }
 }

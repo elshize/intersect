@@ -19,7 +19,7 @@ mod power_set;
 pub use power_set::{power_set_iter, PowerSetIter};
 
 mod term_bitset;
-pub use term_bitset::{TermBitset, TermMask};
+pub use term_bitset::{Intersection, ResultClass, TermMask};
 
 mod index;
 pub use index::{Index, OptimizeMethod};

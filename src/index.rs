@@ -1,15 +1,16 @@
 use crate::graph::Graph;
 use crate::power_set::power_set_iter;
 use crate::set_cover::{greedy_set_cover, set_cover};
-use crate::{Cost, Score, TermBitset, MAX_LIST_COUNT};
+use crate::{Cost, Intersection, ResultClass, Score, MAX_LIST_COUNT};
 use itertools::Itertools;
 use std::collections::HashSet;
+use std::convert::Into;
 use std::iter::FromIterator;
 
 #[derive(Debug)]
 struct CandidateGraph {
-    candidates: Vec<TermBitset>,
-    leaves: Vec<TermBitset>,
+    candidates: Vec<Intersection>,
+    leaves: Vec<Intersection>,
 }
 
 impl CandidateGraph {
@@ -27,7 +28,7 @@ impl CandidateGraph {
                     .iter()
                     .enumerate()
                     .filter_map(|(idx, &leaf)| {
-                        if candidate.covers(leaf) {
+                        if candidate.covers(ResultClass(leaf.0)) {
                             Some(idx)
                         } else {
                             None
@@ -56,17 +57,17 @@ impl CandidateGraph {
 
 #[derive(Default, Debug)]
 struct Switch {
-    remove: Vec<TermBitset>,
-    insert: Vec<TermBitset>,
+    remove: Vec<Intersection>,
+    insert: Vec<Intersection>,
     gain: Cost,
 }
 
 /// Represents a full set of available posting lists for a given query.
 pub struct Index {
     /// All available posting lists partitioned by number of terms.
-    /// Each element contains a vector of posting lists of the same length,
-    /// and the shorter lists always come before the longer ones.
-    pub degrees: Vec<Vec<TermBitset>>,
+    /// Each element contains a vector of intersections of the same degree,
+    /// and the shorter intersections always come before the longer ones.
+    pub degrees: Vec<Vec<Intersection>>,
     /// An array of posting list costs. The cost of `t` is in `costs[t]`.
     pub costs: [Cost; MAX_LIST_COUNT],
     /// An array of posting list upper bounds. The bound of `t` is in `upper_bound[t]`.
@@ -94,19 +95,19 @@ pub enum OptimizeMethod {
 
 impl Index {
     /// Construct a new index containing the given posting lists.
-    pub fn new(posting_lists: &[Vec<(TermBitset, Cost, Score)>]) -> Self {
+    pub fn new(posting_lists: &[Vec<(Intersection, Cost, Score)>]) -> Self {
         let mut costs = [Cost::default(); MAX_LIST_COUNT];
         let mut upper_bounds = [Score::default(); MAX_LIST_COUNT];
-        let mut degrees: Vec<Vec<TermBitset>> = Vec::new();
+        let mut degrees: Vec<Vec<Intersection>> = Vec::new();
         for arity in posting_lists {
-            let mut bags: Vec<TermBitset> = Vec::with_capacity(arity.len());
-            for &(terms, cost, upper_bound) in arity {
-                let idx: usize = terms.into();
+            let mut intersections: Vec<Intersection> = Vec::with_capacity(arity.len());
+            for &(intersection, cost, upper_bound) in arity {
+                let idx: usize = intersection.into();
                 costs[idx] = cost;
                 upper_bounds[idx] = upper_bound;
-                bags.push(terms);
+                intersections.push(intersection);
             }
-            degrees.push(bags);
+            degrees.push(intersections);
         }
         Self {
             degrees,
@@ -115,8 +116,9 @@ impl Index {
         }
     }
 
-    fn cost(&self, terms: TermBitset) -> Cost {
-        self.costs[terms.0 as usize]
+    fn cost(&self, terms: Intersection) -> Cost {
+        let idx: usize = terms.into();
+        self.costs[idx]
     }
 
     /// Select optimal set of posting lists for query execution.
@@ -125,7 +127,7 @@ impl Index {
         query_len: u8,
         threshold: Score,
         method: OptimizeMethod,
-    ) -> Vec<TermBitset> {
+    ) -> Vec<Intersection> {
         match method {
             OptimizeMethod::BruteForce => self.optimize_brute_force(query_len, threshold),
             OptimizeMethod::Exact => self.optimize_smart(query_len, threshold),
@@ -134,18 +136,18 @@ impl Index {
         }
     }
 
-    fn optimize_brute_force(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
-        let classes = TermBitset::result_classes(query_len);
+    fn optimize_brute_force(&self, query_len: u8, threshold: Score) -> Vec<Intersection> {
+        let classes = ResultClass::generate(query_len);
         let must_cover = std::iter::once(false)
             .chain(
                 classes[1..]
                     .iter()
-                    .map(|&TermBitset(mask)| self.upper_bounds[mask as usize] >= threshold),
+                    .map(|&ResultClass(mask)| self.upper_bounds[mask as usize] >= threshold),
             )
             .collect::<Vec<_>>();
         let candidates = self.candidates(query_len, threshold);
         let mut min_cost = Cost(std::f32::MAX);
-        let mut min_subset: Vec<TermBitset> = vec![];
+        let mut min_subset: Vec<Intersection> = vec![];
         for candidate_subset in power_set_iter(&candidates) {
             let candidate_subset: Vec<_> = candidate_subset.cloned().collect();
             let mut covered = vec![0_u8; 2_usize.pow(u32::from(query_len))];
@@ -161,7 +163,7 @@ impl Index {
             }
             let cost = candidate_subset
                 .iter()
-                .map(|&TermBitset(mask)| self.costs[mask as usize])
+                .map(|&Intersection(mask)| self.costs[mask as usize])
                 .sum::<Cost>();
             if cost < min_cost {
                 min_cost = cost;
@@ -171,7 +173,7 @@ impl Index {
         min_subset
     }
 
-    fn optimize_smart(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
+    fn optimize_smart(&self, query_len: u8, threshold: Score) -> Vec<Intersection> {
         let candidates = self.candidate_graph(query_len, threshold);
         let solution = candidates.solve(&self);
         solution
@@ -180,7 +182,7 @@ impl Index {
             .collect()
     }
 
-    fn optimize_greedy(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
+    fn optimize_greedy(&self, query_len: u8, threshold: Score) -> Vec<Intersection> {
         let candidates = self.candidate_graph(query_len, threshold);
         let solution = candidates.solve_greedy(&self);
         solution
@@ -189,12 +191,12 @@ impl Index {
             .collect()
     }
 
-    fn optimize_graph(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
+    fn optimize_graph(&self, query_len: u8, threshold: Score) -> Vec<Intersection> {
         let CandidateGraph { candidates, leaves } = self.candidate_graph(query_len, threshold);
         let graph = Graph::from_iter(candidates.into_iter());
-        let mut solution: HashSet<TermBitset> = leaves.into_iter().collect();
+        let mut solution: HashSet<Intersection> = leaves.into_iter().collect();
         for layer in graph.layers().rev() {
-            let switch_candidates = layer
+            let switch_candidates: Vec<Intersection> = layer
                 .filter_map(|node| {
                     if solution.contains(&node) {
                         graph.parents(node)
@@ -205,7 +207,7 @@ impl Index {
                 .flatten()
                 .cloned()
                 .unique()
-                .collect::<Vec<TermBitset>>();
+                .collect();
             let mut best_switch = Switch::default();
             for candidate_set in power_set_iter(&switch_candidates) {
                 let insert: Vec<_> = candidate_set.cloned().collect();
@@ -254,7 +256,7 @@ impl Index {
     /// This is because these will be either covered automatically by a list from (a)
     /// or one of the list from (b) that covers a list from (a).
     #[inline]
-    fn candidates(&self, query_len: u8, threshold: Score) -> Vec<TermBitset> {
+    fn candidates(&self, query_len: u8, threshold: Score) -> Vec<Intersection> {
         self.layered_candidates(query_len, threshold)
             .into_iter()
             .flatten()
@@ -262,18 +264,18 @@ impl Index {
     }
 
     #[inline]
-    fn layered_candidates(&self, query_len: u8, threshold: Score) -> Vec<Vec<TermBitset>> {
-        let mut cand: Vec<Vec<TermBitset>> = Vec::with_capacity(self.degrees.len());
+    fn layered_candidates(&self, query_len: u8, threshold: Score) -> Vec<Vec<Intersection>> {
+        let mut cand: Vec<Vec<Intersection>> = Vec::with_capacity(self.degrees.len());
         let mut covered = vec![0_u8; 2_usize.pow(u32::from(query_len))];
-        let classes = TermBitset::result_classes(query_len);
+        let classes = ResultClass::generate(query_len);
         for arity in &self.degrees {
-            let mut arity_cand: Vec<TermBitset> = Vec::with_capacity(arity.len());
-            for &posting_list in arity {
-                let TermBitset(mask) = posting_list;
+            let mut arity_cand: Vec<Intersection> = Vec::with_capacity(arity.len());
+            for &intersection in arity {
+                let Intersection(mask) = intersection;
                 if covered[mask as usize] == 0_u8 {
-                    arity_cand.push(posting_list);
+                    arity_cand.push(intersection);
                     if self.upper_bounds[mask as usize] >= threshold {
-                        posting_list.cover(&classes, &mut covered);
+                        intersection.cover(&classes, &mut covered);
                     }
                 }
             }
@@ -284,19 +286,19 @@ impl Index {
 
     #[inline]
     fn candidate_graph(&self, query_len: u8, threshold: Score) -> CandidateGraph {
-        let mut cand: Vec<Vec<TermBitset>> = Vec::with_capacity(self.degrees.len());
-        let mut leaves: Vec<TermBitset> = Vec::with_capacity(query_len.pow(2) as usize);
+        let mut cand: Vec<Vec<Intersection>> = Vec::with_capacity(self.degrees.len());
+        let mut leaves: Vec<Intersection> = Vec::with_capacity(query_len.pow(2) as usize);
         let mut covered = vec![0_u8; 2_usize.pow(u32::from(query_len))];
-        let classes = TermBitset::result_classes(query_len);
+        let classes = ResultClass::generate(query_len);
         for arity in &self.degrees {
-            let mut arity_cand: Vec<TermBitset> = Vec::with_capacity(arity.len());
-            for &posting_list in arity {
-                let TermBitset(mask) = posting_list;
+            let mut arity_cand: Vec<Intersection> = Vec::with_capacity(arity.len());
+            for &intersection in arity {
+                let Intersection(mask) = intersection;
                 if covered[mask as usize] == 0_u8 {
-                    arity_cand.push(posting_list);
+                    arity_cand.push(intersection);
                     if self.upper_bounds[mask as usize] >= threshold {
-                        leaves.push(posting_list);
-                        posting_list.cover(&classes, &mut covered);
+                        leaves.push(intersection);
+                        intersection.cover(&classes, &mut covered);
                     }
                 }
             }
@@ -320,19 +322,19 @@ mod test {
         assert!(index.degrees.is_empty());
         let index = Index::new(&[
             vec![
-                (TermBitset(13), Cost(0.1), Score(0.0)),
-                (TermBitset(4), Cost(1.1), Score(5.6)),
+                (Intersection(13), Cost(0.1), Score(0.0)),
+                (Intersection(4), Cost(1.1), Score(5.6)),
             ],
             vec![
-                (TermBitset(3), Cost(4.1), Score(9.0)),
-                (TermBitset(1), Cost(4.1), Score(1.6)),
+                (Intersection(3), Cost(4.1), Score(9.0)),
+                (Intersection(1), Cost(4.1), Score(1.6)),
             ],
         ]);
         assert_eq!(
             index.degrees,
             vec![
-                vec![TermBitset(13), TermBitset(4)],
-                vec![TermBitset(3), TermBitset(1)],
+                vec![Intersection(13), Intersection(4)],
+                vec![Intersection(3), Intersection(1)],
             ]
         );
         let mut expected_costs = [Cost::default(); MAX_LIST_COUNT];
@@ -355,17 +357,17 @@ mod test {
         let unigrams = (0..query_len)
             .map(|term| {
                 (
-                    TermBitset(1 << term),
+                    Intersection(1 << term),
                     Cost::default(),
                     Score(f32::from(term)),
                 )
             })
             .collect::<Vec<_>>();
-        let mut bigrams: Vec<(TermBitset, Cost, Score)> = Vec::new();
+        let mut bigrams: Vec<(Intersection, Cost, Score)> = Vec::new();
         for left in 0..query_len {
             for right in (left + 1)..query_len {
                 bigrams.push((
-                    TermBitset((1 << left) | (1 << right)),
+                    Intersection((1 << left) | (1 << right)),
                     Cost::default(),
                     Score(f32::from(left + right + 1)),
                 ));
@@ -377,10 +379,10 @@ mod test {
             index.layered_candidates(query_len, Score(0.0)),
             vec![
                 vec![
-                    TermBitset(0b0001),
-                    TermBitset(0b0010),
-                    TermBitset(0b0100),
-                    TermBitset(0b1000)
+                    Intersection(0b0001),
+                    Intersection(0b0010),
+                    Intersection(0b0100),
+                    Intersection(0b1000)
                 ],
                 vec![]
             ]
@@ -390,10 +392,10 @@ mod test {
             index.layered_candidates(query_len, Score(1.0)),
             vec![
                 vec![
-                    TermBitset(0b0001),
-                    TermBitset(0b0010),
-                    TermBitset(0b0100),
-                    TermBitset(0b1000),
+                    Intersection(0b0001),
+                    Intersection(0b0010),
+                    Intersection(0b0100),
+                    Intersection(0b1000),
                 ],
                 vec![]
             ]
@@ -403,12 +405,12 @@ mod test {
             index.layered_candidates(query_len, Score(2.0)),
             vec![
                 vec![
-                    TermBitset(0b0001),
-                    TermBitset(0b0010),
-                    TermBitset(0b0100),
-                    TermBitset(0b1000),
+                    Intersection(0b0001),
+                    Intersection(0b0010),
+                    Intersection(0b0100),
+                    Intersection(0b1000),
                 ],
-                vec![TermBitset(0b0011)],
+                vec![Intersection(0b0011)],
             ]
         );
     }
@@ -419,17 +421,17 @@ mod test {
         let unigrams = (0..query_len)
             .map(|term| {
                 (
-                    TermBitset(1 << term),
+                    Intersection(1 << term),
                     Cost::default(),
                     Score(f32::from(term)),
                 )
             })
             .collect::<Vec<_>>();
-        let mut bigrams: Vec<(TermBitset, Cost, Score)> = Vec::new();
+        let mut bigrams: Vec<(Intersection, Cost, Score)> = Vec::new();
         for left in 0..query_len {
             for right in (left + 1)..query_len {
                 bigrams.push((
-                    TermBitset((1 << left) | (1 << right)),
+                    Intersection((1 << left) | (1 << right)),
                     Cost::default(),
                     Score(f32::from(left + right + 1)),
                 ));
@@ -440,31 +442,31 @@ mod test {
         assert_eq!(
             index.candidates(query_len, Score(0.0)),
             vec![
-                TermBitset(0b0001),
-                TermBitset(0b0010),
-                TermBitset(0b0100),
-                TermBitset(0b1000)
+                Intersection(0b0001),
+                Intersection(0b0010),
+                Intersection(0b0100),
+                Intersection(0b1000)
             ]
         );
 
         assert_eq!(
             index.candidates(query_len, Score(1.0)),
             vec![
-                TermBitset(0b0001),
-                TermBitset(0b0010),
-                TermBitset(0b0100),
-                TermBitset(0b1000),
+                Intersection(0b0001),
+                Intersection(0b0010),
+                Intersection(0b0100),
+                Intersection(0b1000),
             ]
         );
 
         assert_eq!(
             index.candidates(query_len, Score(2.0)),
             vec![
-                TermBitset(0b0001),
-                TermBitset(0b0010),
-                TermBitset(0b0100),
-                TermBitset(0b1000),
-                TermBitset(0b0011),
+                Intersection(0b0001),
+                Intersection(0b0010),
+                Intersection(0b0100),
+                Intersection(0b1000),
+                Intersection(0b0011),
             ]
         );
     }
@@ -473,13 +475,13 @@ mod test {
     fn test_optimize_brute_force() {
         let query_len = 4_u8;
         let unigrams = (0..query_len)
-            .map(|term| (TermBitset(1 << term), Cost(1.0), Score(f32::from(term))))
+            .map(|term| (Intersection(1 << term), Cost(1.0), Score(f32::from(term))))
             .collect::<Vec<_>>();
-        let mut bigrams: Vec<(TermBitset, Cost, Score)> = Vec::new();
+        let mut bigrams: Vec<(Intersection, Cost, Score)> = Vec::new();
         for left in 0..query_len {
             for right in (left + 1)..query_len {
                 bigrams.push((
-                    TermBitset((1 << left) | (1 << right)),
+                    Intersection((1 << left) | (1 << right)),
                     Cost(0.4),
                     Score(f32::from(left + right + 1)),
                 ));
@@ -490,41 +492,53 @@ mod test {
         assert_eq!(
             index.optimize(query_len, Score(0.0), BruteForce),
             vec![
-                TermBitset(0b0001),
-                TermBitset(0b0010),
-                TermBitset(0b0100),
-                TermBitset(0b1000)
+                Intersection(0b0001),
+                Intersection(0b0010),
+                Intersection(0b0100),
+                Intersection(0b1000)
             ]
         );
 
         assert_eq!(
             index.optimize(query_len, Score(1.0), BruteForce),
-            vec![TermBitset(0b0010), TermBitset(0b0100), TermBitset(0b1000)]
+            vec![
+                Intersection(0b0010),
+                Intersection(0b0100),
+                Intersection(0b1000)
+            ]
         );
 
         assert_eq!(
             index.optimize(query_len, Score(2.0), BruteForce),
-            vec![TermBitset(0b0100), TermBitset(0b1000), TermBitset(0b0011)]
+            vec![
+                Intersection(0b0100),
+                Intersection(0b1000),
+                Intersection(0b0011)
+            ]
         );
 
         assert_eq!(
             index.optimize(query_len, Score(3.0), BruteForce),
-            vec![TermBitset(0b1000), TermBitset(0b0101), TermBitset(0b0110)]
+            vec![
+                Intersection(0b1000),
+                Intersection(0b0101),
+                Intersection(0b0110)
+            ]
         );
 
         assert_eq!(
             index.optimize(query_len, Score(4.0), BruteForce),
-            vec![TermBitset(0b1000), TermBitset(0b0110)]
+            vec![Intersection(0b1000), Intersection(0b0110)]
         );
 
         assert_eq!(
             index.optimize(query_len, Score(5.0), BruteForce),
-            vec![TermBitset(0b1010), TermBitset(0b1100)]
+            vec![Intersection(0b1010), Intersection(0b1100)]
         );
 
         assert_eq!(
             index.optimize(query_len, Score(6.0), BruteForce),
-            vec![TermBitset(0b1100)]
+            vec![Intersection(0b1100)]
         );
     }
 
@@ -532,13 +546,13 @@ mod test {
     fn test_optimize_smart() {
         let query_len = 4_u8;
         let unigrams = (0..query_len)
-            .map(|term| (TermBitset(1 << term), Cost(1.0), Score(f32::from(term))))
+            .map(|term| (Intersection(1 << term), Cost(1.0), Score(f32::from(term))))
             .collect::<Vec<_>>();
-        let mut bigrams: Vec<(TermBitset, Cost, Score)> = Vec::new();
+        let mut bigrams: Vec<(Intersection, Cost, Score)> = Vec::new();
         for left in 0..query_len {
             for right in (left + 1)..query_len {
                 bigrams.push((
-                    TermBitset((1 << left) | (1 << right)),
+                    Intersection((1 << left) | (1 << right)),
                     Cost(0.4),
                     Score(f32::from(left + right + 1)),
                 ));
@@ -549,41 +563,53 @@ mod test {
         assert_eq!(
             index.optimize_smart(query_len, Score(0.0)),
             vec![
-                TermBitset(0b0001),
-                TermBitset(0b0010),
-                TermBitset(0b0100),
-                TermBitset(0b1000)
+                Intersection(0b0001),
+                Intersection(0b0010),
+                Intersection(0b0100),
+                Intersection(0b1000)
             ]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(1.0)),
-            vec![TermBitset(0b0010), TermBitset(0b0100), TermBitset(0b1000)]
+            vec![
+                Intersection(0b0010),
+                Intersection(0b0100),
+                Intersection(0b1000)
+            ]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(2.0)),
-            vec![TermBitset(0b0100), TermBitset(0b1000), TermBitset(0b0011)]
+            vec![
+                Intersection(0b0100),
+                Intersection(0b1000),
+                Intersection(0b0011)
+            ]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(3.0)),
-            vec![TermBitset(0b1000), TermBitset(0b0101), TermBitset(0b0110)]
+            vec![
+                Intersection(0b1000),
+                Intersection(0b0101),
+                Intersection(0b0110)
+            ]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(4.0)),
-            vec![TermBitset(0b1000), TermBitset(0b0110)]
+            vec![Intersection(0b1000), Intersection(0b0110)]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(5.0)),
-            vec![TermBitset(0b1010), TermBitset(0b1100)]
+            vec![Intersection(0b1010), Intersection(0b1100)]
         );
 
         assert_eq!(
             index.optimize_smart(query_len, Score(6.0)),
-            vec![TermBitset(0b1100)]
+            vec![Intersection(0b1100)]
         );
     }
 
@@ -591,13 +617,13 @@ mod test {
     fn test_optimize_graph() {
         let query_len = 4_u8;
         let unigrams = (0..query_len)
-            .map(|term| (TermBitset(1 << term), Cost(1.0), Score(f32::from(term))))
+            .map(|term| (Intersection(1 << term), Cost(1.0), Score(f32::from(term))))
             .collect::<Vec<_>>();
-        let mut bigrams: Vec<(TermBitset, Cost, Score)> = Vec::new();
+        let mut bigrams: Vec<(Intersection, Cost, Score)> = Vec::new();
         for left in 0..query_len {
             for right in (left + 1)..query_len {
                 bigrams.push((
-                    TermBitset((1 << left) | (1 << right)),
+                    Intersection((1 << left) | (1 << right)),
                     Cost(0.4),
                     Score(f32::from(left + right + 1)),
                 ));
@@ -608,41 +634,53 @@ mod test {
         assert_eq!(
             index.optimize_graph(query_len, Score(0.0)),
             vec![
-                TermBitset(0b0001),
-                TermBitset(0b0010),
-                TermBitset(0b0100),
-                TermBitset(0b1000)
+                Intersection(0b0001),
+                Intersection(0b0010),
+                Intersection(0b0100),
+                Intersection(0b1000)
             ]
         );
 
         assert_eq!(
             index.optimize_graph(query_len, Score(1.0)),
-            vec![TermBitset(0b0010), TermBitset(0b0100), TermBitset(0b1000)]
+            vec![
+                Intersection(0b0010),
+                Intersection(0b0100),
+                Intersection(0b1000)
+            ]
         );
 
         assert_eq!(
             index.optimize_graph(query_len, Score(2.0)),
-            vec![TermBitset(0b0011), TermBitset(0b0100), TermBitset(0b1000)]
+            vec![
+                Intersection(0b0011),
+                Intersection(0b0100),
+                Intersection(0b1000)
+            ]
         );
 
         assert_eq!(
             index.optimize_graph(query_len, Score(3.0)),
-            vec![TermBitset(0b0101), TermBitset(0b0110), TermBitset(0b1000)]
+            vec![
+                Intersection(0b0101),
+                Intersection(0b0110),
+                Intersection(0b1000)
+            ]
         );
 
         assert_eq!(
             index.optimize_graph(query_len, Score(4.0)),
-            vec![TermBitset(0b0110), TermBitset(0b1000)]
+            vec![Intersection(0b0110), Intersection(0b1000)]
         );
 
         assert_eq!(
             index.optimize_graph(query_len, Score(5.0)),
-            vec![TermBitset(0b1010), TermBitset(0b1100)]
+            vec![Intersection(0b1010), Intersection(0b1100)]
         );
 
         assert_eq!(
             index.optimize_graph(query_len, Score(6.0)),
-            vec![TermBitset(0b1100)]
+            vec![Intersection(0b1100)]
         );
     }
 }
