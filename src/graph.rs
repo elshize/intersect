@@ -6,7 +6,7 @@
 //! of degree `d + 1` if `n` covers `m`, or (another way of looking at it)
 //! `m` contains all of the terms of `n` (and one additional term).
 
-use crate::{TermBitset, TermMask};
+use crate::{Intersection, TermMask};
 use failure::{format_err, Error};
 use num::cast::ToPrimitive;
 #[cfg(feature = "serde")]
@@ -39,21 +39,21 @@ impl TryFrom<u32> for Degree {
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Graph {
-    nodes: Vec<Vec<TermBitset>>,
-    parents: Vec<Vec<TermBitset>>,
-    children: Vec<Vec<TermBitset>>,
+    nodes: Vec<Vec<Intersection>>,
+    parents: Vec<Vec<Intersection>>,
+    children: Vec<Vec<Intersection>>,
 }
 
-impl FromIterator<TermBitset> for Graph {
-    fn from_iter<I: IntoIterator<Item = TermBitset>>(iter: I) -> Self {
-        let mut node_map: HashMap<u8, Vec<TermBitset>> = HashMap::new();
+impl FromIterator<Intersection> for Graph {
+    fn from_iter<I: IntoIterator<Item = Intersection>>(iter: I) -> Self {
+        let mut node_map: HashMap<u8, Vec<Intersection>> = HashMap::new();
         let mut max_degree = 0_u8;
         for terms in iter {
             let degree = terms.0.count_ones().try_into().unwrap();
             node_map.entry(degree).or_default().push(terms);
             max_degree = std::cmp::max(degree, max_degree);
         }
-        let mut nodes: Vec<Vec<TermBitset>> = vec![vec![]; (max_degree + 1) as usize];
+        let mut nodes: Vec<Vec<Intersection>> = vec![vec![]; (max_degree + 1) as usize];
         node_map
             .into_iter()
             .for_each(|(deg, terms)| nodes[deg as usize] = terms);
@@ -74,18 +74,18 @@ impl Graph {
                 if mask.count_ones() > u32::from(max_degree) {
                     None
                 } else {
-                    Some(TermBitset(mask))
+                    Some(Intersection(mask))
                 }
             },
         )))
     }
 
     /// Constructs a graph by connecting neighboring layers in the given vector.
-    pub fn from_nodes(mut nodes: Vec<Vec<TermBitset>>) -> Self {
-        let &TermBitset(max_node) = nodes.iter().flatten().max().unwrap_or(&TermBitset(0));
+    pub fn from_nodes(mut nodes: Vec<Vec<Intersection>>) -> Self {
+        let &Intersection(max_node) = nodes.iter().flatten().max().unwrap_or(&Intersection(0));
         nodes.iter_mut().for_each(|v| v.sort());
-        let mut parents: Vec<Vec<TermBitset>> = vec![vec![]; max_node as usize + 1];
-        let mut children: Vec<Vec<TermBitset>> = vec![vec![]; max_node as usize + 1];
+        let mut parents: Vec<Vec<Intersection>> = vec![vec![]; max_node as usize + 1];
+        let mut children: Vec<Vec<Intersection>> = vec![vec![]; max_node as usize + 1];
         for window in nodes[1..].windows(2).rev() {
             match window {
                 [higher, lower] => Self::connect_layers(higher, lower, &mut parents, &mut children),
@@ -102,19 +102,19 @@ impl Graph {
     }
 
     fn connect_layers(
-        higher: &[TermBitset],
-        lower: &[TermBitset],
-        parents: &mut Vec<Vec<TermBitset>>,
-        children: &mut Vec<Vec<TermBitset>>,
+        higher: &[Intersection],
+        lower: &[Intersection],
+        parents: &mut Vec<Vec<Intersection>>,
+        children: &mut Vec<Vec<Intersection>>,
     ) {
-        for &TermBitset(node) in lower {
+        for &Intersection(node) in lower {
             let mut recipe = node;
             while recipe > 0 {
                 let bit_to_flip = 1 << recipe.trailing_zeros();
                 let parent = node ^ bit_to_flip;
-                if higher.binary_search(&TermBitset(parent)).is_ok() {
-                    parents[node as usize].push(TermBitset(parent));
-                    children[parent as usize].push(TermBitset(node));
+                if higher.binary_search(&Intersection(parent)).is_ok() {
+                    parents[node as usize].push(Intersection(parent));
+                    children[parent as usize].push(Intersection(node));
                 }
                 recipe -= bit_to_flip;
             }
@@ -128,14 +128,14 @@ impl Graph {
     ///
     /// ```
     /// # use intersect::graph::{Degree, Graph};
-    /// # use intersect::TermBitset;
+    /// # use intersect::Intersection;
     /// # fn main() -> Result<(), failure::Error> {
     /// let graph = Graph::full(3, Degree(3))?;
     /// // Layer of degree 0 is always empty.
     /// assert!(graph.layer(Degree(0)).collect::<Vec<_>>().is_empty());
     /// assert_eq!(
     ///     graph.layer(Degree(2)).collect::<Vec<_>>(),
-    ///     vec![TermBitset(0b011), TermBitset(0b101), TermBitset(0b110)]
+    ///     vec![Intersection(0b011), Intersection(0b101), Intersection(0b110)]
     /// );
     /// // Any layer above the maximum degree will be empty.
     /// assert!(graph.layer(Degree(4)).collect::<Vec<_>>().is_empty());
@@ -172,18 +172,18 @@ impl Graph {
 
     /// Parents of the given term subset.
     /// These are nodes of lower degree (fewer terms).
-    pub fn parents(&self, terms: TermBitset) -> Option<&[TermBitset]> {
+    pub fn parents(&self, terms: Intersection) -> Option<&[Intersection]> {
         self.parents.get(terms.0 as usize).map(|v| &v[..])
     }
 
     /// Children of the given term subset.
     /// These are nodes of higher degree (more terms).
-    pub fn children(&self, terms: TermBitset) -> Option<&[TermBitset]> {
+    pub fn children(&self, terms: Intersection) -> Option<&[Intersection]> {
         self.children.get(terms.0 as usize).map(|v| &v[..])
     }
 
     /// An iterator over all edges: parents (if any) following by children (if any).
-    pub fn edges(&self, term: TermBitset) -> Edges {
+    pub fn edges(&self, term: Intersection) -> Edges {
         Edges {
             iter: self
                 .parents(term)
@@ -197,11 +197,11 @@ impl Graph {
 /// Iterator over nodes in a single layer of a graph. The return type of
 /// [`layer`](struct.Graph.html#method.layer).
 pub struct Layer<'a> {
-    iter: Option<std::slice::Iter<'a, TermBitset>>,
+    iter: Option<std::slice::Iter<'a, Intersection>>,
 }
 
 impl<'a> Iterator for Layer<'a> {
-    type Item = TermBitset;
+    type Item = Intersection;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.as_mut()?.next().cloned()
@@ -211,7 +211,7 @@ impl<'a> Iterator for Layer<'a> {
 /// Iterator over layers of a graph. The return type of
 /// [`layers`](struct.Graph.html#method.layers).
 pub struct Layers<'a> {
-    iter: std::slice::Iter<'a, Vec<TermBitset>>,
+    iter: std::slice::Iter<'a, Vec<Intersection>>,
 }
 
 impl<'a> Iterator for Layers<'a> {
@@ -235,11 +235,11 @@ impl<'a> DoubleEndedIterator for Layers<'a> {
 /// Iterator over all edges of a node (both parents and children). The return type of
 /// [`edges`](struct.Graph.html#method.edges).
 pub struct Edges<'a> {
-    iter: std::iter::Chain<std::slice::Iter<'a, TermBitset>, std::slice::Iter<'a, TermBitset>>,
+    iter: std::iter::Chain<std::slice::Iter<'a, Intersection>, std::slice::Iter<'a, Intersection>>,
 }
 
 impl<'a> Iterator for Edges<'a> {
-    type Item = TermBitset;
+    type Item = Intersection;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().cloned()
@@ -254,11 +254,19 @@ mod test {
     fn test_connect_layers() {
         let nodes = vec![
             vec![],
-            vec![TermBitset(0b001), TermBitset(0b010), TermBitset(0b100)],
-            vec![TermBitset(0b011), TermBitset(0b101), TermBitset(0b110)],
+            vec![
+                Intersection(0b001),
+                Intersection(0b010),
+                Intersection(0b100),
+            ],
+            vec![
+                Intersection(0b011),
+                Intersection(0b101),
+                Intersection(0b110),
+            ],
         ];
-        let mut parents: Vec<Vec<TermBitset>> = vec![vec![]; 7];
-        let mut children: Vec<Vec<TermBitset>> = vec![vec![]; 7];
+        let mut parents: Vec<Vec<Intersection>> = vec![vec![]; 7];
+        let mut children: Vec<Vec<Intersection>> = vec![vec![]; 7];
         Graph::connect_layers(&nodes[1], &nodes[2], &mut parents, &mut children);
         assert_eq!(
             parents,
@@ -266,20 +274,20 @@ mod test {
                 vec![],
                 vec![],
                 vec![],
-                vec![TermBitset(0b010), TermBitset(0b001)],
+                vec![Intersection(0b010), Intersection(0b001)],
                 vec![],
-                vec![TermBitset(0b100), TermBitset(0b001)],
-                vec![TermBitset(0b100), TermBitset(0b010)],
+                vec![Intersection(0b100), Intersection(0b001)],
+                vec![Intersection(0b100), Intersection(0b010)],
             ]
         );
         assert_eq!(
             children,
             vec![
                 vec![],
-                vec![TermBitset(0b011), TermBitset(0b101)],
-                vec![TermBitset(0b011), TermBitset(0b110)],
+                vec![Intersection(0b011), Intersection(0b101)],
+                vec![Intersection(0b011), Intersection(0b110)],
                 vec![],
-                vec![TermBitset(0b101), TermBitset(0b110)],
+                vec![Intersection(0b101), Intersection(0b110)],
                 vec![],
                 vec![],
             ]
@@ -301,7 +309,11 @@ mod test {
             Graph {
                 nodes: vec![
                     vec![],
-                    vec![TermBitset(0b001), TermBitset(0b010), TermBitset(0b100),],
+                    vec![
+                        Intersection(0b001),
+                        Intersection(0b010),
+                        Intersection(0b100),
+                    ],
                 ],
                 parents: vec![vec![]; 5],
                 children: vec![vec![]; 5],
@@ -312,24 +324,32 @@ mod test {
             Graph {
                 nodes: vec![
                     vec![],
-                    vec![TermBitset(0b001), TermBitset(0b010), TermBitset(0b100),],
-                    vec![TermBitset(0b011), TermBitset(0b101), TermBitset(0b110),],
+                    vec![
+                        Intersection(0b001),
+                        Intersection(0b010),
+                        Intersection(0b100),
+                    ],
+                    vec![
+                        Intersection(0b011),
+                        Intersection(0b101),
+                        Intersection(0b110),
+                    ],
                 ],
                 parents: vec![
                     vec![],
                     vec![],
                     vec![],
-                    vec![TermBitset(0b001), TermBitset(0b010)],
+                    vec![Intersection(0b001), Intersection(0b010)],
                     vec![],
-                    vec![TermBitset(0b001), TermBitset(0b100)],
-                    vec![TermBitset(0b010), TermBitset(0b100)],
+                    vec![Intersection(0b001), Intersection(0b100)],
+                    vec![Intersection(0b010), Intersection(0b100)],
                 ],
                 children: vec![
                     vec![],
-                    vec![TermBitset(0b011), TermBitset(0b101)],
-                    vec![TermBitset(0b011), TermBitset(0b110)],
+                    vec![Intersection(0b011), Intersection(0b101)],
+                    vec![Intersection(0b011), Intersection(0b110)],
                     vec![],
-                    vec![TermBitset(0b101), TermBitset(0b110)],
+                    vec![Intersection(0b101), Intersection(0b110)],
                     vec![],
                     vec![],
                 ],
@@ -340,29 +360,41 @@ mod test {
             Graph {
                 nodes: vec![
                     vec![],
-                    vec![TermBitset(0b001), TermBitset(0b010), TermBitset(0b100),],
-                    vec![TermBitset(0b011), TermBitset(0b101), TermBitset(0b110),],
-                    vec![TermBitset(0b111)]
+                    vec![
+                        Intersection(0b001),
+                        Intersection(0b010),
+                        Intersection(0b100),
+                    ],
+                    vec![
+                        Intersection(0b011),
+                        Intersection(0b101),
+                        Intersection(0b110),
+                    ],
+                    vec![Intersection(0b111)]
                 ],
                 parents: vec![
                     vec![],
-                    vec![],                                                        // 0b001
-                    vec![],                                                        // 0b010
-                    vec![TermBitset(0b001), TermBitset(0b010)],                    // 0b011
-                    vec![],                                                        // 0b100
-                    vec![TermBitset(0b001), TermBitset(0b100)],                    // 0b101
-                    vec![TermBitset(0b010), TermBitset(0b100)],                    // 0b110
-                    vec![TermBitset(0b011), TermBitset(0b101), TermBitset(0b110)], // 0b111
+                    vec![],                                         // 0b001
+                    vec![],                                         // 0b010
+                    vec![Intersection(0b001), Intersection(0b010)], // 0b011
+                    vec![],                                         // 0b100
+                    vec![Intersection(0b001), Intersection(0b100)], // 0b101
+                    vec![Intersection(0b010), Intersection(0b100)], // 0b110
+                    vec![
+                        Intersection(0b011),
+                        Intersection(0b101),
+                        Intersection(0b110)
+                    ], // 0b111
                 ],
                 children: vec![
                     vec![],
-                    vec![TermBitset(0b011), TermBitset(0b101)], // 0b001
-                    vec![TermBitset(0b011), TermBitset(0b110)], // 0b010
-                    vec![TermBitset(0b111)],                    // 0b011
-                    vec![TermBitset(0b101), TermBitset(0b110)], // 0b100
-                    vec![TermBitset(0b111)],                    // 0b101
-                    vec![TermBitset(0b111)],                    // 0b110
-                    vec![],                                     // 0b111
+                    vec![Intersection(0b011), Intersection(0b101)], // 0b001
+                    vec![Intersection(0b011), Intersection(0b110)], // 0b010
+                    vec![Intersection(0b111)],                      // 0b011
+                    vec![Intersection(0b101), Intersection(0b110)], // 0b100
+                    vec![Intersection(0b111)],                      // 0b101
+                    vec![Intersection(0b111)],                      // 0b110
+                    vec![],                                         // 0b111
                 ]
             }
         );
@@ -375,15 +407,23 @@ mod test {
         assert_eq!(graph.layer(Degree(0)).collect::<Vec<_>>(), vec![]);
         assert_eq!(
             graph.layer(Degree(1)).collect::<Vec<_>>(),
-            vec![TermBitset(0b001), TermBitset(0b010), TermBitset(0b100)]
+            vec![
+                Intersection(0b001),
+                Intersection(0b010),
+                Intersection(0b100)
+            ]
         );
         assert_eq!(
             graph.layer(Degree(2)).collect::<Vec<_>>(),
-            vec![TermBitset(0b011), TermBitset(0b101), TermBitset(0b110)]
+            vec![
+                Intersection(0b011),
+                Intersection(0b101),
+                Intersection(0b110)
+            ]
         );
         assert_eq!(
             graph.layer(Degree(3)).collect::<Vec<_>>(),
-            vec![TermBitset(0b111)]
+            vec![Intersection(0b111)]
         );
     }
 
@@ -393,15 +433,23 @@ mod test {
         let mut layers = graph.layers();
         assert_eq!(
             layers.next().unwrap().collect::<Vec<_>>(),
-            vec![TermBitset(0b001), TermBitset(0b010), TermBitset(0b100)]
+            vec![
+                Intersection(0b001),
+                Intersection(0b010),
+                Intersection(0b100)
+            ]
         );
         assert_eq!(
             layers.next().unwrap().collect::<Vec<_>>(),
-            vec![TermBitset(0b011), TermBitset(0b101), TermBitset(0b110)]
+            vec![
+                Intersection(0b011),
+                Intersection(0b101),
+                Intersection(0b110)
+            ]
         );
         assert_eq!(
             layers.next().unwrap().collect::<Vec<_>>(),
-            vec![TermBitset(0b111)]
+            vec![Intersection(0b111)]
         );
         assert!(layers.next().is_none());
     }
@@ -412,15 +460,23 @@ mod test {
         let mut layers = graph.layers().rev();
         assert_eq!(
             layers.next().unwrap().collect::<Vec<_>>(),
-            vec![TermBitset(0b111)]
+            vec![Intersection(0b111)]
         );
         assert_eq!(
             layers.next().unwrap().collect::<Vec<_>>(),
-            vec![TermBitset(0b011), TermBitset(0b101), TermBitset(0b110)]
+            vec![
+                Intersection(0b011),
+                Intersection(0b101),
+                Intersection(0b110)
+            ]
         );
         assert_eq!(
             layers.next().unwrap().collect::<Vec<_>>(),
-            vec![TermBitset(0b001), TermBitset(0b010), TermBitset(0b100)]
+            vec![
+                Intersection(0b001),
+                Intersection(0b010),
+                Intersection(0b100)
+            ]
         );
         assert!(layers.next().is_none());
     }
@@ -430,7 +486,7 @@ mod test {
         let graph = Graph::full(3, Degree(3)).unwrap();
         let (Degree(degree), layer) = graph.last_layer().unwrap();
         assert_eq!(degree, 3);
-        assert_eq!(layer.collect::<Vec<_>>(), vec![TermBitset(0b111)]);
+        assert_eq!(layer.collect::<Vec<_>>(), vec![Intersection(0b111)]);
 
         let graph = Graph::full(3, Degree(0)).unwrap();
         assert!(graph.last_layer().is_none());
@@ -439,22 +495,30 @@ mod test {
     #[test]
     fn test_edges() {
         let graph = Graph::full(3, Degree(3)).unwrap();
-        assert_eq!(graph.edges(TermBitset(0b000)).collect::<Vec<_>>(), vec![]);
+        assert_eq!(graph.edges(Intersection(0b000)).collect::<Vec<_>>(), vec![]);
         assert_eq!(
-            graph.edges(TermBitset(0b001)).collect::<Vec<_>>(),
-            vec![TermBitset(0b011), TermBitset(0b101)]
+            graph.edges(Intersection(0b001)).collect::<Vec<_>>(),
+            vec![Intersection(0b011), Intersection(0b101)]
         );
         assert_eq!(
-            graph.edges(TermBitset(0b010)).collect::<Vec<_>>(),
-            vec![TermBitset(0b011), TermBitset(0b110)]
+            graph.edges(Intersection(0b010)).collect::<Vec<_>>(),
+            vec![Intersection(0b011), Intersection(0b110)]
         );
         assert_eq!(
-            graph.edges(TermBitset(0b101)).collect::<Vec<_>>(),
-            vec![TermBitset(0b001), TermBitset(0b100), TermBitset(0b111)]
+            graph.edges(Intersection(0b101)).collect::<Vec<_>>(),
+            vec![
+                Intersection(0b001),
+                Intersection(0b100),
+                Intersection(0b111)
+            ]
         );
         assert_eq!(
-            graph.edges(TermBitset(0b111)).collect::<Vec<_>>(),
-            vec![TermBitset(0b011), TermBitset(0b101), TermBitset(0b110)]
+            graph.edges(Intersection(0b111)).collect::<Vec<_>>(),
+            vec![
+                Intersection(0b011),
+                Intersection(0b101),
+                Intersection(0b110)
+            ]
         );
     }
 }
