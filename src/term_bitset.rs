@@ -1,5 +1,6 @@
 use crate::{Query, Term};
 use failure::{format_err, Error, ResultExt};
+use num::ToPrimitive;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -58,18 +59,64 @@ impl Into<usize> for ResultClass {
 }
 
 impl ResultClass {
-    /// Generates all possible result classes for this query length.
+    /// Iterates over all possible result classes for this query length.
     ///
     /// Essentially, it generates a vector of values from 0 to `2^len`.
-    pub fn generate(len: u8) -> Vec<Self> {
+    ///
+    /// # Examples
+    /// ```
+    /// # use intersect::ResultClass;
+    /// assert_eq!(
+    ///     ResultClass::all(2).map(|ResultClass(c)| c).collect::<Vec<u8>>(),
+    ///     vec![0_u8, 1, 2, 3]
+    /// );
+    /// ```
+    pub fn all(len: u8) -> impl Iterator<Item = Self> {
         let two: TermMask = 2;
-        (0..two.pow(u32::from(len))).map(Self).collect()
+        (0..two.pow(u32::from(len))).map(Self)
+    }
+
+    /// Collects all possible result classes to a vector.
+    ///
+    /// # Examples
+    ///
+    /// This is a convenient shorthand to [`all`](#methods.all) that collects elements
+    /// instead of returning an iterator.
+    /// ```
+    /// # use intersect::ResultClass;
+    /// assert_eq!(ResultClass::all_to_vec(3), ResultClass::all(3).collect::<Vec<_>>());
+    /// ```
+    pub fn all_to_vec(len: u8) -> Vec<Self> {
+        Self::all(len).collect()
     }
 
     /// Number of terms in this class.
     #[inline]
     pub fn degree(self) -> u32 {
         self.0.count_ones()
+    }
+
+    /// Iterator over result class of each single term.
+    pub fn components(self) -> ClassComponents {
+        ClassComponents { mask: self.0 }
+    }
+}
+
+pub struct ClassComponents {
+    mask: TermMask,
+}
+
+impl Iterator for ClassComponents {
+    type Item = ResultClass;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.mask == 0 {
+            None
+        } else {
+            let item = 1 << self.mask.trailing_zeros();
+            self.mask ^= item;
+            Some(ResultClass(item))
+        }
     }
 }
 
@@ -124,11 +171,53 @@ impl Intersection {
     pub fn degree(self) -> u32 {
         self.0.count_ones()
     }
+
+    /// Iterator over positions in the query of contained terms.
+    ///
+    /// # Examples
+    ///
+    /// Notice that you can freely call it on a temporary object, because `Intersection`
+    /// implements [`Copy`](https://doc.rust-lang.org/std/marker/trait.Copy.html) trait.
+    /// ```
+    /// # use intersect::Intersection;
+    /// let mut terms = Intersection(0b10101).terms();
+    /// assert_eq!(terms.next(), Some(0));
+    /// assert_eq!(terms.next(), Some(2));
+    /// assert_eq!(terms.next(), Some(4));
+    /// assert_eq!(terms.next(), None);
+    /// ```
+    pub fn terms(self) -> IntersectionTerms {
+        IntersectionTerms { mask: self.0 }
+    }
+}
+
+pub struct IntersectionTerms {
+    mask: TermMask,
+}
+
+impl Iterator for IntersectionTerms {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.mask == 0 {
+            None
+        } else {
+            let item = self.mask.trailing_zeros().to_u8().unwrap();
+            self.mask ^= 1 << item;
+            Some(item)
+        }
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_intersection_terms() {
+        let inter = Intersection(0b10101);
+        assert_eq!(inter.terms().collect::<Vec<_>>(), vec![0, 2, 4]);
+    }
 
     #[test]
     fn test_from_str() {
@@ -188,7 +277,7 @@ mod test {
     #[test]
     fn test_result_classes() {
         assert_eq!(
-            ResultClass::generate(3),
+            ResultClass::all_to_vec(3),
             vec![
                 ResultClass(0b000),
                 ResultClass(0b001),
@@ -205,7 +294,7 @@ mod test {
     #[test]
     fn test_cover() {
         // let classes: Vec<_> = (0..8).map(ResultClass).collect();
-        let classes: Vec<_> = ResultClass::generate(3);
+        let classes: Vec<_> = ResultClass::all_to_vec(3);
 
         let mut covered = [0_u8; 8];
         Intersection(0b101).cover(&classes, &mut covered);

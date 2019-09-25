@@ -76,6 +76,31 @@ impl std::ops::Sub for Cost {
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
 pub struct Score(pub f32);
 
+impl std::iter::Sum<Self> for Score {
+    fn sum<I>(iter: I) -> Self
+    where
+        I: Iterator<Item = Self>,
+    {
+        Self(iter.map(|Self(cost)| cost).sum())
+    }
+}
+
+impl std::ops::Add for Score {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self(self.0 + other.0)
+    }
+}
+
+impl std::ops::Sub for Score {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        Self(self.0 - other.0)
+    }
+}
+
 /// Query representation
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Query {
@@ -106,6 +131,12 @@ mod test {
     fn test_cost_sum() {
         let costs = vec![Cost(0.1), Cost(1.0), Cost(0.01)];
         assert_eq!(costs.iter().cloned().sum::<Cost>(), Cost(1.11));
+    }
+
+    #[test]
+    fn test_score_sum() {
+        let costs = vec![Score(17.0), Score(1.0), Score(0.01)];
+        assert_eq!(costs.iter().cloned().sum::<Score>(), Score(18.01));
     }
 
     #[test]
