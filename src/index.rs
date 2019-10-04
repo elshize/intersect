@@ -2,23 +2,25 @@ use crate::graph::Graph;
 use crate::power_set::power_set_iter;
 use crate::set_cover::{greedy_set_cover, set_cover};
 use crate::{Cost, Intersection, ResultClass, Score, MAX_LIST_COUNT};
-use failure::{format_err, Error};
+use failure::{bail, format_err, Error};
 use itertools::Itertools;
 use num::ToPrimitive;
+use ordered_float::OrderedFloat;
 use std::collections::HashSet;
-use std::convert::Into;
-use std::fmt;
+use std::convert::{Into, TryInto};
 use std::iter::FromIterator;
+use std::{fmt, str::FromStr};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Candidates {
     all: Vec<Intersection>,
     leaves: Vec<Intersection>,
+    uncovered_classes: Vec<ResultClass>,
 }
 
 impl Candidates {
     fn cardinality(&self) -> usize {
-        self.leaves.len()
+        self.leaves.len() + self.uncovered_classes.len()
     }
 
     fn subsets(&self, index: &Index) -> Vec<(usize, Vec<usize>, f32)> {
@@ -29,9 +31,15 @@ impl Candidates {
                 let set: Vec<usize> = self
                     .leaves
                     .iter()
+                    .map(|&Intersection(leaf)| leaf)
+                    .chain(
+                        self.uncovered_classes
+                            .iter()
+                            .map(|&ResultClass(class)| class),
+                    )
                     .enumerate()
-                    .filter_map(|(idx, &leaf)| {
-                        if candidate.covers(ResultClass(leaf.0)) {
+                    .filter_map(|(idx, elem)| {
+                        if candidate.covers(ResultClass(elem)) {
                             Some(idx)
                         } else {
                             None
@@ -121,6 +129,20 @@ pub enum OptimizeMethod {
     Graph,
 }
 
+impl FromStr for OptimizeMethod {
+    type Err = Error;
+
+    fn from_str(method: &str) -> Result<Self, Self::Err> {
+        match method {
+            "brute-force" => Ok(Self::BruteForce),
+            "exact" => Ok(Self::Exact),
+            "greedy" => Ok(Self::Greedy),
+            "graph" => Ok(Self::Graph),
+            method => bail!("Invalid optimize method: {}", method),
+        }
+    }
+}
+
 impl Index {
     /// Construct a new index containing the given posting lists.
     pub fn new(
@@ -164,28 +186,24 @@ impl Index {
         })
     }
 
-    fn cost(&self, terms: Intersection) -> Cost {
+    /// Cost of a given intersection.
+    pub fn cost(&self, terms: Intersection) -> Cost {
         let idx: usize = terms.into();
         self.costs[idx]
     }
 
     /// Select optimal set of posting lists for query execution.
-    pub fn optimize(
-        &self,
-        query_len: u8,
-        threshold: Score,
-        method: OptimizeMethod,
-    ) -> Vec<Intersection> {
+    pub fn optimize(&mut self, threshold: Score, method: OptimizeMethod) -> Vec<Intersection> {
         match method {
-            OptimizeMethod::BruteForce => self.optimize_brute_force(query_len, threshold),
-            OptimizeMethod::Exact => self.optimize_smart(query_len, threshold),
-            OptimizeMethod::Greedy => self.optimize_greedy(query_len, threshold),
-            OptimizeMethod::Graph => self.optimize_graph(query_len, threshold),
+            OptimizeMethod::BruteForce => self.optimize_brute_force(threshold),
+            OptimizeMethod::Exact => self.optimize_exact(threshold),
+            OptimizeMethod::Greedy => self.optimize_greedy(threshold),
+            OptimizeMethod::Graph => self.optimize_graph(threshold),
         }
     }
 
-    fn optimize_brute_force(&self, query_len: u8, threshold: Score) -> Vec<Intersection> {
-        let classes = ResultClass::all_to_vec(query_len);
+    fn optimize_brute_force(&self, threshold: Score) -> Vec<Intersection> {
+        let classes = ResultClass::all_to_vec(self.query_len);
         let must_cover = std::iter::once(false)
             .chain(
                 classes[1..]
@@ -195,12 +213,12 @@ impl Index {
             .collect::<Vec<_>>();
         let Candidates {
             all: candidates, ..
-        } = self.candidates(query_len, threshold);
+        } = self.candidates(threshold);
         let mut min_cost = Cost(std::f32::MAX);
         let mut min_subset: Vec<Intersection> = vec![];
         for candidate_subset in power_set_iter(&candidates) {
             let candidate_subset: Vec<_> = candidate_subset.cloned().collect();
-            let mut covered = vec![0_u8; 2_usize.pow(u32::from(query_len))];
+            let mut covered = vec![0_u8; 2_usize.pow(u32::from(self.query_len))];
             for bag in &candidate_subset {
                 bag.cover(&classes, &mut covered);
             }
@@ -223,8 +241,8 @@ impl Index {
         min_subset
     }
 
-    fn optimize_smart(&self, query_len: u8, threshold: Score) -> Vec<Intersection> {
-        let candidates = self.candidates(query_len, threshold);
+    fn optimize_exact(&self, threshold: Score) -> Vec<Intersection> {
+        let candidates = self.candidates(threshold);
         let solution = candidates.solve(&self);
         solution
             .into_iter()
@@ -232,8 +250,8 @@ impl Index {
             .collect()
     }
 
-    fn optimize_greedy(&self, query_len: u8, threshold: Score) -> Vec<Intersection> {
-        let candidates = self.candidates(query_len, threshold);
+    fn optimize_greedy(&self, threshold: Score) -> Vec<Intersection> {
+        let candidates = self.candidates(threshold);
         let solution = candidates.solve_greedy(&self);
         solution
             .into_iter()
@@ -241,13 +259,37 @@ impl Index {
             .collect()
     }
 
-    fn optimize_graph(&self, query_len: u8, threshold: Score) -> Vec<Intersection> {
+    fn optimize_graph(&mut self, threshold: Score) -> Vec<Intersection> {
         let Candidates {
             all: candidates,
             leaves,
-        } = self.candidates(query_len, threshold);
-        let graph = Graph::from_iter(candidates.into_iter());
-        let mut solution: HashSet<Intersection> = leaves.into_iter().collect();
+            uncovered_classes,
+        } = self.candidates(threshold);
+
+        // These must be covered but cannot be selected.
+        let phony_candidates: HashSet<_> = uncovered_classes
+            .into_iter()
+            .map(|ResultClass(class)| Intersection(class))
+            .collect();
+
+        let graph = Graph::from_iter(
+            candidates
+                .into_iter()
+                .chain(phony_candidates.iter().cloned()),
+        );
+        let mut solution: HashSet<Intersection> = leaves
+            .into_iter()
+            .chain(phony_candidates.iter().cloned())
+            .collect();
+        let &max_cost = self
+            .costs
+            .iter()
+            .max_by(|Cost(lhs), Cost(rhs)| OrderedFloat(*lhs).cmp(&OrderedFloat(*rhs)))
+            .unwrap();
+        for Intersection(phony) in phony_candidates {
+            self.costs[phony as usize] =
+                max_cost + Cost(2.0 * phony.count_ones().to_f32().unwrap());
+        }
         for layer in graph.layers().rev() {
             let switch_candidates: Vec<Intersection> = layer
                 .filter_map(|node| {
@@ -309,11 +351,11 @@ impl Index {
     /// This is because these will be either covered automatically by a list from (a)
     /// or one of the list from (b) that covers a list from (a).
     #[inline]
-    fn candidates(&self, query_len: u8, threshold: Score) -> Candidates {
+    fn candidates(&self, threshold: Score) -> Candidates {
         let mut cand: Vec<Vec<Intersection>> = Vec::with_capacity(self.degrees.len());
-        let mut leaves: Vec<Intersection> = Vec::with_capacity(query_len.pow(2) as usize);
-        let classes = ResultClass::all_to_vec(query_len);
-        let mut covered = vec![0_u8; 2_usize.pow(u32::from(query_len))];
+        let mut leaves: Vec<Intersection> = Vec::with_capacity(self.query_len.pow(2) as usize);
+        let classes = ResultClass::all_to_vec(self.query_len);
+        let mut covered = vec![0_u8; 2_usize.pow(u32::from(self.query_len))];
         for arity in &self.degrees {
             let mut arity_cand: Vec<Intersection> = Vec::with_capacity(arity.len());
             for &intersection in arity {
@@ -333,6 +375,18 @@ impl Index {
         Candidates {
             all: cand.into_iter().flatten().collect(),
             leaves,
+            uncovered_classes: covered
+                .into_iter()
+                .enumerate()
+                .skip(1)
+                .filter_map(|(mask, is_covered)| {
+                    if is_covered == 0_u8 && self.upper_bounds[mask] >= threshold {
+                        Some(ResultClass(mask.try_into().unwrap()))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -341,6 +395,29 @@ impl Index {
     /// trait, pretty-printing the index.
     pub fn pretty(&self) -> Pretty {
         Pretty { index: self }
+    }
+}
+
+impl FromIterator<(Intersection, Cost, Score)> for Index {
+    fn from_iter<T: IntoIterator<Item = (Intersection, Cost, Score)>>(iter: T) -> Self {
+        let mut query_len = 0_u8;
+        let mut posting_lists: Vec<Vec<(Intersection, Cost, Score)>> = Vec::new();
+        for (inter, cost, score) in iter {
+            let len = inter
+                .0
+                .trailing_zeros()
+                .to_u8()
+                .expect("Unable to cast u32 to u8")
+                + 1;
+            query_len = std::cmp::max(query_len, len);
+            let level = inter.0.count_ones() as usize;
+            if posting_lists.len() < level {
+                posting_lists.resize_with(level, Default::default);
+            }
+            posting_lists[level.checked_sub(1).expect("Intersection cannot be 0")]
+                .push((inter, cost, score));
+        }
+        Self::new(query_len, &posting_lists).expect("Unable to create index")
     }
 }
 
@@ -419,6 +496,134 @@ mod test {
         Index::new(4, &[unigrams, bigrams]).unwrap()
     }
 
+    #[derive(Clone, Copy)]
+    enum FlracMode {
+        Bigrams,
+        Trigrams,
+    }
+
+    fn french_lick_resort_and_casino(mode: FlracMode) -> Index {
+        let i = |n, c, s| (Intersection(n), Cost(c), Score(s));
+        let unigrams = vec![
+            i(0b00001, 3_207_698.0, 5.09),
+            i(0b00010, 217_056.0, 10.3128),
+            i(0b00100, 1_402_926.0, 6.72921),
+            i(0b01000, 44_575_252.0, 1.89675e-06),
+            i(0b10000, 802_140.0, 7.81291),
+        ];
+        let bigrams = vec![
+            i(0b00011, 27_634.0, 15.3662),
+            i(0b00101, 165_409.0, 11.655),
+            i(0b01001, 3_023_926.0, 5.0903),
+            i(0b10001, 77_753.0, 12.7071),
+            i(0b00110, 12_303.0, 16.8082),
+            i(0b01010, 209_498.0, 10.3128),
+            i(0b10010, 6_900.0, 17.8669),
+            i(0b01100, 1_351_378.0, 6.72921),
+            i(0b10100, 147_880.0, 14.5006),
+            i(0b11000, 729_376.0, 7.81292),
+        ];
+        match mode {
+            FlracMode::Bigrams => Index::new(5, &[unigrams, bigrams]).unwrap(),
+            FlracMode::Trigrams => Index::new(
+                5,
+                &[
+                    unigrams,
+                    bigrams,
+                    vec![
+                        i(0b00111, 3_503.0, 21.8352),
+                        i(0b01011, 27_004.0, 15.3662),
+                        i(0b10011, 2348.0, 22.8938),
+                        i(0b01101, 164_017.0, 11.655),
+                        i(0b10101, 21_485.0, 19.3285),
+                        i(0b11001, 75_136.0, 12.7071),
+                        i(0b01110, 12_188.0, 16.8082),
+                        i(0b10110, 2_367.0, 24.4883),
+                        i(0b11010, 6_751.0, 17.8669),
+                        i(0b11100, 142_814.0, 14.5006),
+                    ],
+                ],
+            )
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn test_flrac_bigrams_candidates() {
+        let index = french_lick_resort_and_casino(FlracMode::Bigrams);
+        let mut candidates = index.candidates(Score(16.4));
+        let mut expected: Vec<_> = index.degrees.iter().flatten().cloned().collect();
+        expected.sort();
+        candidates.all.sort();
+        assert_eq!(candidates.all, expected);
+        assert_eq!(
+            candidates.uncovered_classes,
+            // ACE + ACDE are not covered by the leaves.
+            vec![ResultClass(21), ResultClass(29)]
+        );
+    }
+
+    #[test]
+    fn test_flrac_trigrams_candidates() {
+        let index = french_lick_resort_and_casino(FlracMode::Trigrams);
+        let mut candidates = index.candidates(Score(16.4));
+        let mut expected: Vec<_> = index.degrees.iter().take(2).flatten().cloned().collect();
+        expected.push(Intersection(11));
+        expected.push(Intersection(13));
+        expected.push(Intersection(21));
+        expected.push(Intersection(25));
+        expected.push(Intersection(28));
+        expected.sort();
+        candidates.all.sort();
+        assert_eq!(candidates.all, expected);
+        assert_eq!(
+            candidates.leaves,
+            vec![Intersection(6), Intersection(18), Intersection(21)]
+        );
+        assert!(candidates.uncovered_classes.is_empty());
+    }
+
+    #[test]
+    fn test_flrac_bigrams_solve() {
+        let mut index = french_lick_resort_and_casino(FlracMode::Bigrams);
+
+        let threshold = Score(16.4);
+        let mut bf_opt = index.optimize(threshold, BruteForce);
+        let mut exact_opt = index.optimize(threshold, Exact);
+        let mut greedy_opt = index.optimize(threshold, Greedy);
+        let mut graph_opt = index.optimize(threshold, Graph);
+
+        bf_opt.sort();
+        exact_opt.sort();
+        greedy_opt.sort();
+        graph_opt.sort();
+
+        let expected = vec![Intersection(6), Intersection(17), Intersection(18)];
+        assert_eq!(bf_opt, expected);
+        assert_eq!(exact_opt, expected);
+        assert_eq!(greedy_opt, expected);
+        assert_eq!(graph_opt, expected);
+    }
+
+    #[test]
+    fn test_flrac_trigrams_solve() {
+        let mut index = french_lick_resort_and_casino(FlracMode::Trigrams);
+
+        let threshold = Score(16.4);
+        let mut exact_opt = index.optimize(threshold, Exact);
+        let mut greedy_opt = index.optimize(threshold, Greedy);
+        let mut graph_opt = index.optimize(threshold, Graph);
+
+        exact_opt.sort();
+        greedy_opt.sort();
+        graph_opt.sort();
+
+        let expected = vec![Intersection(6), Intersection(18), Intersection(21)];
+        assert_eq!(exact_opt, expected);
+        assert_eq!(greedy_opt, expected);
+        assert_eq!(graph_opt, expected);
+    }
+
     #[rstest]
     #[allow(clippy::needless_pass_by_value)]
     fn test_format_index(full_bigram_index: Index) {
@@ -433,12 +638,9 @@ mod test {
     #[rstest]
     fn test_candidates(full_bigram_index: Index) {
         let index = full_bigram_index;
-        let query_len = index.query_len;
-
-        println!("{}", index.pretty());
 
         assert_eq!(
-            index.candidates(query_len, Score(0.0)),
+            index.candidates(Score(0.0)),
             Candidates {
                 all: vec![
                     Intersection(0b0001),
@@ -451,12 +653,13 @@ mod test {
                     Intersection(0b0010),
                     Intersection(0b0100),
                     Intersection(0b1000)
-                ]
+                ],
+                uncovered_classes: vec![]
             }
         );
 
         assert_eq!(
-            index.candidates(query_len, Score(1.0)),
+            index.candidates(Score(1.0)),
             Candidates {
                 all: vec![
                     Intersection(0b0001),
@@ -468,12 +671,13 @@ mod test {
                     Intersection(0b0010),
                     Intersection(0b0100),
                     Intersection(0b1000),
-                ]
+                ],
+                uncovered_classes: vec![]
             }
         );
 
         assert_eq!(
-            index.candidates(query_len, Score(2.0)),
+            index.candidates(Score(2.0)),
             Candidates {
                 all: vec![
                     Intersection(0b0001),
@@ -486,7 +690,8 @@ mod test {
                     Intersection(0b0100),
                     Intersection(0b1000),
                     Intersection(0b0011),
-                ]
+                ],
+                uncovered_classes: vec![]
             }
         );
     }
@@ -507,10 +712,10 @@ mod test {
                 ));
             }
         }
-        let index = Index::new(4, &[unigrams, bigrams]).unwrap();
+        let mut index = Index::new(4, &[unigrams, bigrams]).unwrap();
 
         assert_eq!(
-            index.optimize(query_len, Score(0.0), BruteForce),
+            index.optimize(Score(0.0), BruteForce),
             vec![
                 Intersection(0b0001),
                 Intersection(0b0010),
@@ -520,7 +725,7 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(1.0), BruteForce),
+            index.optimize(Score(1.0), BruteForce),
             vec![
                 Intersection(0b0010),
                 Intersection(0b0100),
@@ -529,7 +734,7 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(2.0), BruteForce),
+            index.optimize(Score(2.0), BruteForce),
             vec![
                 Intersection(0b0100),
                 Intersection(0b1000),
@@ -538,7 +743,7 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(3.0), BruteForce),
+            index.optimize(Score(3.0), BruteForce),
             vec![
                 Intersection(0b1000),
                 Intersection(0b0101),
@@ -547,17 +752,17 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(4.0), BruteForce),
+            index.optimize(Score(4.0), BruteForce),
             vec![Intersection(0b1000), Intersection(0b0110)]
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(5.0), BruteForce),
+            index.optimize(Score(5.0), BruteForce),
             vec![Intersection(0b1010), Intersection(0b1100)]
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(6.0), BruteForce),
+            index.optimize(Score(6.0), BruteForce),
             vec![Intersection(0b1100)]
         );
     }
@@ -578,10 +783,10 @@ mod test {
                 ));
             }
         }
-        let index = Index::new(0, &[unigrams, bigrams]).unwrap();
+        let mut index = Index::new(4, &[unigrams, bigrams]).unwrap();
 
         assert_eq!(
-            index.optimize(query_len, Score(0.0), Exact),
+            index.optimize(Score(0.0), Exact),
             vec![
                 Intersection(0b0001),
                 Intersection(0b0010),
@@ -591,7 +796,7 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(1.0), Exact),
+            index.optimize(Score(1.0), Exact),
             vec![
                 Intersection(0b0010),
                 Intersection(0b0100),
@@ -600,7 +805,7 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(2.0), Exact),
+            index.optimize(Score(2.0), Exact),
             vec![
                 Intersection(0b0100),
                 Intersection(0b1000),
@@ -609,7 +814,7 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(3.0), Exact),
+            index.optimize(Score(3.0), Exact),
             vec![
                 Intersection(0b1000),
                 Intersection(0b0101),
@@ -618,17 +823,17 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(4.0), Exact),
+            index.optimize(Score(4.0), Exact),
             vec![Intersection(0b1000), Intersection(0b0110)]
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(5.0), Exact),
+            index.optimize(Score(5.0), Exact),
             vec![Intersection(0b1010), Intersection(0b1100)]
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(6.0), Exact),
+            index.optimize(Score(6.0), Exact),
             vec![Intersection(0b1100)]
         );
     }
@@ -649,11 +854,11 @@ mod test {
                 ));
             }
         }
-        let index = Index::new(0, &[unigrams, bigrams]).unwrap();
+        let mut index = Index::new(4, &[unigrams, bigrams]).unwrap();
 
         assert_eq!(
             index
-                .optimize(query_len, Score(0.0), Greedy)
+                .optimize(Score(0.0), Greedy)
                 .into_iter()
                 .collect::<HashSet<Intersection>>(),
             vec![
@@ -668,7 +873,7 @@ mod test {
 
         assert_eq!(
             index
-                .optimize(query_len, Score(1.0), Greedy)
+                .optimize(Score(1.0), Greedy)
                 .into_iter()
                 .collect::<HashSet<Intersection>>(),
             vec![
@@ -682,7 +887,7 @@ mod test {
 
         assert_eq!(
             index
-                .optimize(query_len, Score(2.0), Greedy)
+                .optimize(Score(2.0), Greedy)
                 .into_iter()
                 .collect::<HashSet<Intersection>>(),
             vec![
@@ -696,7 +901,7 @@ mod test {
 
         assert_eq!(
             index
-                .optimize(query_len, Score(3.0), Greedy)
+                .optimize(Score(3.0), Greedy)
                 .into_iter()
                 .collect::<HashSet<Intersection>>(),
             vec![
@@ -710,7 +915,7 @@ mod test {
 
         assert_eq!(
             index
-                .optimize(query_len, Score(4.0), Greedy)
+                .optimize(Score(4.0), Greedy)
                 .into_iter()
                 .collect::<HashSet<Intersection>>(),
             vec![Intersection(0b0110), Intersection(0b1000)]
@@ -720,7 +925,7 @@ mod test {
 
         assert_eq!(
             index
-                .optimize(query_len, Score(5.0), Greedy)
+                .optimize(Score(5.0), Greedy)
                 .into_iter()
                 .collect::<HashSet<Intersection>>(),
             vec![Intersection(0b1010), Intersection(0b1100)]
@@ -730,7 +935,7 @@ mod test {
 
         assert_eq!(
             index
-                .optimize(query_len, Score(6.0), Greedy)
+                .optimize(Score(6.0), Greedy)
                 .into_iter()
                 .collect::<HashSet<Intersection>>(),
             vec![Intersection(0b1100)]
@@ -755,10 +960,10 @@ mod test {
                 ));
             }
         }
-        let index = Index::new(0, &[unigrams, bigrams]).unwrap();
+        let mut index = Index::new(4, &[unigrams, bigrams]).unwrap();
 
         assert_eq!(
-            index.optimize(query_len, Score(0.0), Graph),
+            index.optimize(Score(0.0), Graph),
             vec![
                 Intersection(0b0001),
                 Intersection(0b0010),
@@ -768,7 +973,7 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(1.0), Graph),
+            index.optimize(Score(1.0), Graph),
             vec![
                 Intersection(0b0010),
                 Intersection(0b0100),
@@ -777,7 +982,7 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(2.0), Graph),
+            index.optimize(Score(2.0), Graph),
             vec![
                 Intersection(0b0011),
                 Intersection(0b0100),
@@ -786,7 +991,7 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(3.0), Graph),
+            index.optimize(Score(3.0), Graph),
             vec![
                 Intersection(0b0101),
                 Intersection(0b0110),
@@ -795,17 +1000,17 @@ mod test {
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(4.0), Graph),
+            index.optimize(Score(4.0), Graph),
             vec![Intersection(0b0110), Intersection(0b1000)]
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(5.0), Graph),
+            index.optimize(Score(5.0), Graph),
             vec![Intersection(0b1010), Intersection(0b1100)]
         );
 
         assert_eq!(
-            index.optimize(query_len, Score(6.0), Graph),
+            index.optimize(Score(6.0), Graph),
             vec![Intersection(0b1100)]
         );
     }
