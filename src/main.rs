@@ -20,6 +20,10 @@ struct Args {
     separator: String,
     #[structopt(short = "m", long = "method", default_value = "\t")]
     method: OptimizeMethod,
+    /// Filters out available intersections to contain only those
+    /// having max a given number of terms.
+    #[structopt(long = "max")]
+    max_terms: Option<u32>,
 }
 
 fn split_columns<'a>(
@@ -97,7 +101,12 @@ fn main(args: Args) -> Result<(), Error> {
                 .peeking_take_while(|(q, _)| q == &query)
                 .map(|(_, i)| i),
         );
-        let mut index = Index::from_iter(iter);
+        let mut index = if let Some(max) = args.max_terms {
+            let iter = iter.filter(|(Intersection(i), _, _)| i.count_ones() <= max);
+            Index::from_iter(iter)
+        } else {
+            Index::from_iter(iter)
+        };
         let &threshold = thresholds
             .get(&query)
             .ok_or_else(|| format_err!("Missing threshold for query: {}", query))?;
