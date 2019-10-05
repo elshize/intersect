@@ -13,7 +13,6 @@ use num::cast::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::convert::TryInto;
 use std::iter::FromIterator;
 
 /// Type-safe representation of an n-gram degree.
@@ -63,9 +62,9 @@ impl FromIterator<Intersection> for Graph {
     fn from_iter<I: IntoIterator<Item = Intersection>>(iter: I) -> Self {
         let mut node_map: HashMap<u8, Vec<Intersection>> = HashMap::new();
         let mut max_degree = 0_u8;
-        for terms in iter {
-            let degree = terms.0.count_ones().try_into().unwrap();
-            node_map.entry(degree).or_default().push(terms);
+        for intersection in iter {
+            let degree = intersection.degree().to_u8().unwrap();
+            node_map.entry(degree).or_default().push(intersection);
             max_degree = std::cmp::max(degree, max_degree);
         }
         let mut nodes: Vec<Vec<Intersection>> = vec![vec![]; (max_degree + 1) as usize];
@@ -164,7 +163,7 @@ impl Graph {
         let mut orphans: Vec<Intersection> = Vec::new();
         for &mut node in &mut low[0] {
             let mut potential_parents: Vec<_> = ParentsGenerator::new(node).collect();
-            for _ in 0..(node.0.count_ones() as usize - lower) {
+            for _ in 0..(node.degree() as usize - lower) {
                 let new_parents: Vec<_> = potential_parents
                     .iter()
                     .flat_map(|&p| ParentsGenerator::new(p))
@@ -320,6 +319,7 @@ impl<'a> Iterator for Edges<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_connect_layers() {
@@ -591,5 +591,16 @@ mod test {
                 Intersection(0b110)
             ]
         );
+    }
+
+    proptest! {
+        #[test]
+        fn test_try_into_degree(d in 0_u32..255) {
+            assert_eq!(u32::from(Degree::try_from(d).unwrap().0), d);
+        }
+        #[test]
+        fn add_to_degree(d in 0_u8..100, x in 0_u8..100) {
+            assert_eq!(Degree(d) + x, Degree(d + x));
+        }
     }
 }
