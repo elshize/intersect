@@ -18,10 +18,25 @@ use std::iter::FromIterator;
 
 /// Type-safe representation of an n-gram degree.
 ///
-/// E.g., an intersection of 3 terms is of degree 3, while a single posting list is of degree 1.
+/// E.g., an intersection of 3 terms is of degree 3,
+/// while a single posting list is of degree 1.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Degree(pub u8);
+
+impl std::ops::Add<u8> for Degree {
+    type Output = Self;
+    fn add(self, rhs: u8) -> Self::Output {
+        Self(self.0 + rhs)
+    }
+}
+
+impl std::ops::Sub<u8> for Degree {
+    type Output = Self;
+    fn sub(self, rhs: u8) -> Self::Output {
+        Self(self.0 - rhs)
+    }
+}
 
 impl TryFrom<u32> for Degree {
     type Error = Error;
@@ -61,6 +76,36 @@ impl FromIterator<Intersection> for Graph {
     }
 }
 
+struct ParentsGenerator {
+    node: u8,
+    recipe: u8,
+}
+
+impl ParentsGenerator {
+    fn new(node: Intersection) -> Self {
+        Self {
+            node: node.0,
+            recipe: node.0,
+        }
+    }
+}
+
+impl Iterator for ParentsGenerator {
+    type Item = Intersection;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.recipe > 0 {
+            let bit_to_flip = 1 << self.recipe.trailing_zeros();
+            let parent = self.node ^ bit_to_flip;
+            let next = Intersection(parent);
+            self.recipe -= bit_to_flip;
+            Some(next)
+        } else {
+            None
+        }
+    }
+}
+
 impl Graph {
     /// Constructs a full graph having all n-grams up to a given degree.
     pub fn full(nterms: u8, max_degree: Degree) -> Result<Self, Error> {
@@ -86,11 +131,8 @@ impl Graph {
         nodes.iter_mut().for_each(|v| v.sort());
         let mut parents: Vec<Vec<Intersection>> = vec![vec![]; max_node as usize + 1];
         let mut children: Vec<Vec<Intersection>> = vec![vec![]; max_node as usize + 1];
-        for window in nodes[1..].windows(2).rev() {
-            match window {
-                [higher, lower] => Self::connect_layers(higher, lower, &mut parents, &mut children),
-                _ => unreachable!(),
-            }
+        for degree in (2..nodes.len()).rev() {
+            Self::connect_layers(&mut nodes, degree, &mut parents, &mut children);
         }
         parents.iter_mut().for_each(|v| v.sort());
         children.iter_mut().for_each(|v| v.sort());
@@ -101,24 +143,47 @@ impl Graph {
         }
     }
 
+    /// Connect layer `lower` to its parent layer (one with nodes with lower degrees).
+    ///
+    /// In case of phony nodes (representing only a result class but not a real
+    /// existing intersection), there might be no connections to the higher layer.
+    /// Then, we need to push that node up in order to try to connect it to the
+    /// following layer.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if `nodes[lower]` or `nodes[lower - 1]` is out of bound.
+    /// This must be guaranteed by `from_nodes` function, which invokes this one.
     fn connect_layers(
-        higher: &[Intersection],
-        lower: &[Intersection],
+        nodes: &mut Vec<Vec<Intersection>>,
+        lower: usize,
         parents: &mut Vec<Vec<Intersection>>,
         children: &mut Vec<Vec<Intersection>>,
     ) {
-        for &Intersection(node) in lower {
-            let mut recipe = node;
-            while recipe > 0 {
-                let bit_to_flip = 1 << recipe.trailing_zeros();
-                let parent = node ^ bit_to_flip;
-                if higher.binary_search(&Intersection(parent)).is_ok() {
-                    parents[node as usize].push(Intersection(parent));
-                    children[parent as usize].push(Intersection(node));
+        let (hi, low) = nodes.split_at_mut(lower);
+        let mut orphans: Vec<Intersection> = Vec::new();
+        for &mut node in &mut low[0] {
+            let mut potential_parents: Vec<_> = ParentsGenerator::new(node).collect();
+            for _ in 0..(node.0.count_ones() as usize - lower) {
+                let new_parents: Vec<_> = potential_parents
+                    .iter()
+                    .flat_map(|&p| ParentsGenerator::new(p))
+                    .collect();
+                std::mem::replace(&mut potential_parents, new_parents);
+            }
+            let mut has_parents = false;
+            for parent in potential_parents {
+                if hi.last().unwrap().binary_search(&parent).is_ok() {
+                    has_parents = true;
+                    parents[node.0 as usize].push(parent);
+                    children[parent.0 as usize].push(node);
                 }
-                recipe -= bit_to_flip;
+            }
+            if !has_parents {
+                orphans.push(node);
             }
         }
+        nodes[lower - 1].extend(orphans);
     }
 
     /// Returns an iterator over all nodes of a certain degree.
@@ -151,6 +216,12 @@ impl Graph {
     /// Returns the highest degree in the graph.
     pub fn max_degree(&self) -> Degree {
         Degree(self.nodes.len().to_u8().unwrap() - 1)
+    }
+
+    /// Iterate over available degrees, starting from 1, up to and including
+    /// [`max_degree()`](#method.max_degree).
+    pub fn degrees(&self) -> impl DoubleEndedIterator<Item = Degree> {
+        (1..self.nodes.len().to_u8().unwrap()).map(Degree)
     }
 
     /// Returns the layer of the highest degree and that degree.
@@ -252,7 +323,7 @@ mod test {
 
     #[test]
     fn test_connect_layers() {
-        let nodes = vec![
+        let mut nodes = vec![
             vec![],
             vec![
                 Intersection(0b001),
@@ -267,7 +338,7 @@ mod test {
         ];
         let mut parents: Vec<Vec<Intersection>> = vec![vec![]; 7];
         let mut children: Vec<Vec<Intersection>> = vec![vec![]; 7];
-        Graph::connect_layers(&nodes[1], &nodes[2], &mut parents, &mut children);
+        Graph::connect_layers(&mut nodes, 2, &mut parents, &mut children);
         assert_eq!(
             parents,
             vec![
@@ -301,7 +372,7 @@ mod test {
             Graph {
                 nodes: vec![vec![]],
                 parents: vec![vec![]],
-                children: vec![vec![]]
+                children: vec![vec![]],
             }
         );
         assert_eq!(
@@ -395,7 +466,7 @@ mod test {
                     vec![Intersection(0b111)],                      // 0b101
                     vec![Intersection(0b111)],                      // 0b110
                     vec![],                                         // 0b111
-                ]
+                ],
             }
         );
         assert!(Graph::full(3, Degree(4)).is_err());
