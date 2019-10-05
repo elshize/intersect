@@ -126,6 +126,7 @@ impl Deref for Query {
 #[cfg(test)]
 mod test {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_cost_sum() {
@@ -143,5 +144,24 @@ mod test {
     fn test_query_deref() {
         let query = Query::new(vec![Term(0), Term(1), Term(0)]);
         assert_eq!(*query, vec![Term(0), Term(1), Term(0)]);
+    }
+
+    proptest! {
+        #[test]
+        fn add_costs(x in 0_f32..100.0, y in 0_f32..100.0) {
+            prop_assert_eq!(Cost(x) + Cost(y), Cost(x + y));
+        }
+        #[test]
+        fn subtract_costs(x in 0_f32..100.0, y in 0_f32..100.0) {
+            prop_assert_eq!(Cost(x) - Cost(y), Cost(x - y));
+        }
+        #[test]
+        fn add_scores(x in 0_f32..100.0, y in 0_f32..100.0) {
+            prop_assert_eq!(Score(x) + Score(y), Score(x + y));
+        }
+        #[test]
+        fn subtract_scores(x in 0_f32..100.0, y in 0_f32..100.0) {
+            prop_assert_eq!(Score(x) - Score(y), Score(x - y));
+        }
     }
 }

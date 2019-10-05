@@ -111,7 +111,7 @@ impl<'a> fmt::Display for Pretty<'a> {
 }
 
 /// Method of selecting optimal set of intersections.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptimizeMethod {
     /// Brute-force method calculating exactly all possible subsets.
     /// Very slow on anything non-trivial.
@@ -440,6 +440,7 @@ impl FromIterator<(Intersection, Cost, Score)> for Index {
 #[cfg(test)]
 mod test {
     use super::*;
+    use proptest::prelude::*;
     use rstest::{fixture, rstest};
     use OptimizeMethod::{BruteForce, Exact, Graph, Greedy};
 
@@ -1029,5 +1030,57 @@ mod test {
             index.optimize(Score(6.0), Graph),
             vec![Intersection(0b1100)]
         );
+    }
+
+    #[test]
+    fn test_optimize_method_from_str() {
+        assert_eq!(
+            "brute-force".parse::<OptimizeMethod>().ok(),
+            Some(BruteForce)
+        );
+        assert_eq!("exact".parse::<OptimizeMethod>().ok(), Some(Exact));
+        assert_eq!("greedy".parse::<OptimizeMethod>().ok(), Some(Greedy));
+        assert_eq!("graph".parse::<OptimizeMethod>().ok(), Some(Graph));
+        assert!("unknown".parse::<OptimizeMethod>().is_err());
+    }
+
+    proptest! {
+
+        #[test]
+        fn index_from_iter(
+            unigrams in prop::sample::subsequence(vec![0b001_u8, 0b010_u8, 0b100_u8], 3)
+                .prop_filter("Must have at least one unigram", |v| !v.is_empty()),
+            bigrams in prop::sample::subsequence(vec![0b011_u8, 0b110_u8, 0b101_u8], 3),
+        ) {
+            let transform = |v: Vec<_>| -> Vec<_> {
+                v
+                    .into_iter()
+                    .map(|u| {
+                        (Intersection(u), Cost(u.to_f32().unwrap()), Score(u.to_f32().unwrap()))
+                    })
+                    .collect()
+            };
+            let unigrams: Vec<_> = transform(unigrams);
+            let bigrams: Vec<_> = transform(bigrams);
+            let trigrams: Vec<_> = transform(vec![0b111_u8]);
+            let levels: Vec<Vec<(Intersection, Cost, Score)>> = vec![
+                unigrams,
+                bigrams,
+                trigrams
+            ];
+            let index_from_iter = Index::from_iter(levels.iter().flatten().cloned());
+            let index_from_levels = Index::new(3, &levels).unwrap();
+            assert_eq!(index_from_iter.degrees, index_from_levels.degrees);
+            assert_eq!(
+                index_from_iter.costs.iter().collect::<Vec<_>>(),
+                index_from_levels.costs.iter().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                index_from_iter.upper_bounds.iter().collect::<Vec<_>>(),
+                index_from_levels.upper_bounds.iter().collect::<Vec<_>>()
+            );
+            assert_eq!(index_from_iter.query_len, index_from_levels.query_len);
+        }
+
     }
 }
