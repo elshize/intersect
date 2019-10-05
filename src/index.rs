@@ -287,48 +287,64 @@ impl Index {
             .max_by(|Cost(lhs), Cost(rhs)| OrderedFloat(*lhs).cmp(&OrderedFloat(*rhs)))
             .unwrap();
         for Intersection(phony) in phony_candidates {
-            self.costs[phony as usize] =
-                max_cost + Cost(2.0 * phony.count_ones().to_f32().unwrap());
+            self.costs[phony as usize] = Cost(max_cost.0 * phony.count_ones().to_f32().unwrap());
         }
-        for layer in graph.layers().rev() {
-            let switch_candidates: Vec<Intersection> = layer
-                .filter_map(|node| {
-                    if solution.contains(&node) {
-                        graph.parents(node)
-                    } else {
-                        None
-                    }
-                })
-                .flatten()
-                .cloned()
-                .unique()
-                .collect();
-            let mut best_switch = Switch::default();
-            for candidate_set in power_set_iter(&switch_candidates) {
-                let insert: Vec<_> = candidate_set.cloned().collect();
-                let remove: Vec<_> = insert
+        for degree in graph.degrees().rev() {
+            let mut layer: HashSet<_> = graph.layer(degree).collect();
+            let mut parent_layer: HashSet<_> = graph.layer(degree - 1).collect();
+            loop {
+                let switch_candidates: Vec<Intersection> = layer
                     .iter()
-                    .flat_map(|&p| graph.children(p).unwrap_or(&[]))
-                    .filter(|n| solution.contains(n))
+                    .filter_map(|&node| {
+                        if solution.contains(&node) {
+                            graph
+                                .parents(node)
+                                .map(|some| some.iter().filter(|p| parent_layer.contains(p)))
+                        } else {
+                            None
+                        }
+                    })
+                    .flatten()
                     .cloned()
                     .unique()
                     .collect();
-                let gain = remove.iter().map(|&ch| self.cost(ch)).sum::<Cost>()
-                    - insert.iter().map(|&ch| self.cost(ch)).sum::<Cost>();
-                if gain > best_switch.gain {
-                    best_switch = Switch {
-                        remove,
-                        insert,
-                        gain,
-                    };
+                let mut best_switch = Switch::default();
+                for candidate_set in power_set_iter(&switch_candidates) {
+                    let insert: Vec<_> = candidate_set.cloned().collect();
+                    let remove: Vec<_> = insert
+                        .iter()
+                        .flat_map(|&p| {
+                            graph
+                                .children(p)
+                                .unwrap_or(&[])
+                                .iter()
+                                .filter(|c| layer.contains(c))
+                        })
+                        .filter(|n| solution.contains(n))
+                        .cloned()
+                        .unique()
+                        .collect();
+                    let gain = remove.iter().map(|&ch| self.cost(ch)).sum::<Cost>()
+                        - insert.iter().map(|&ch| self.cost(ch)).sum::<Cost>();
+                    if gain > best_switch.gain {
+                        best_switch = Switch {
+                            remove,
+                            insert,
+                            gain,
+                        };
+                    }
                 }
-            }
-            if best_switch.gain > Cost(0_f32) {
-                for node in best_switch.remove {
-                    solution.remove(&node);
-                }
-                for node in best_switch.insert {
-                    solution.insert(node);
+                if best_switch.gain > Cost(0_f32) {
+                    for node in best_switch.remove {
+                        solution.remove(&node);
+                        layer.remove(&node);
+                    }
+                    for node in best_switch.insert {
+                        solution.insert(node);
+                        parent_layer.remove(&node);
+                    }
+                } else {
+                    break;
                 }
             }
         }
@@ -391,7 +407,7 @@ impl Index {
     }
 
     /// Returns an object implementing
-    /// [`Display`] : https://doc.rust-lang.org/std/fmt/trait.Display.html
+    /// [`Display`](https://doc.rust-lang.org/std/fmt/trait.Display.html)
     /// trait, pretty-printing the index.
     pub fn pretty(&self) -> Pretty {
         Pretty { index: self }
