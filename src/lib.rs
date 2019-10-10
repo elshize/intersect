@@ -12,6 +12,8 @@
 #![deny(clippy::all, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+use ordered_float::OrderedFloat;
+use std::cmp::Ordering;
 use std::iter::Iterator;
 use std::ops::Deref;
 
@@ -44,8 +46,22 @@ const QUERY_LEN_EXCEEDED: &str = &"Max query len exceeded";
 pub struct Term(pub u32);
 
 /// Represents a cost of processing a certain intersection of terms.
-#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, PartialOrd)]
 pub struct Cost(pub f32);
+
+impl Ord for Cost {
+    fn cmp(&self, other: &Self) -> Ordering {
+        OrderedFloat(self.0).cmp(&OrderedFloat(other.0))
+    }
+}
+
+impl PartialEq for Cost {
+    fn eq(&self, other: &Self) -> bool {
+        OrderedFloat(self.0).eq(&OrderedFloat(other.0))
+    }
+}
+
+impl Eq for Cost {}
 
 impl std::iter::Sum<Self> for Cost {
     fn sum<I>(iter: I) -> Self

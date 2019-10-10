@@ -5,7 +5,6 @@ use crate::{Cost, Intersection, ResultClass, Score, MAX_LIST_COUNT};
 use failure::{bail, format_err, Error};
 use itertools::Itertools;
 use num::ToPrimitive;
-use ordered_float::OrderedFloat;
 use std::collections::HashSet;
 use std::convert::{Into, TryInto};
 use std::iter::FromIterator;
@@ -127,6 +126,9 @@ pub enum OptimizeMethod {
     /// than `Greedy` (to be determined) but not as fast.
     /// Still, is reasonably fast if yields better results.
     Graph,
+    /// Similar to graph, but faster by greedily selecting parents with smallest costs.
+    /// (Is it equivalent to `Graph`?)
+    GraphGreedy,
 }
 
 impl FromStr for OptimizeMethod {
@@ -138,6 +140,7 @@ impl FromStr for OptimizeMethod {
             "exact" => Ok(Self::Exact),
             "greedy" => Ok(Self::Greedy),
             "graph" => Ok(Self::Graph),
+            "graph-greedy" => Ok(Self::GraphGreedy),
             method => bail!("Invalid optimize method: {}", method),
         }
     }
@@ -187,8 +190,8 @@ impl Index {
     }
 
     /// Cost of a given intersection.
-    pub fn cost(&self, terms: Intersection) -> Cost {
-        let idx: usize = terms.into();
+    pub fn cost(&self, intersection: Intersection) -> Cost {
+        let idx: usize = intersection.into();
         self.costs[idx]
     }
 
@@ -199,6 +202,7 @@ impl Index {
             OptimizeMethod::Exact => self.optimize_exact(threshold),
             OptimizeMethod::Greedy => self.optimize_greedy(threshold),
             OptimizeMethod::Graph => self.optimize_graph(threshold),
+            OptimizeMethod::GraphGreedy => self.optimize_graph_greedy(threshold),
         }
     }
 
@@ -281,70 +285,122 @@ impl Index {
             .into_iter()
             .chain(phony_candidates.iter().cloned())
             .collect();
-        let &max_cost = self
-            .costs
-            .iter()
-            .max_by(|Cost(lhs), Cost(rhs)| OrderedFloat(*lhs).cmp(&OrderedFloat(*rhs)))
-            .unwrap();
+        let &max_cost = self.costs.iter().max().unwrap();
         for Intersection(phony) in phony_candidates {
             self.costs[phony as usize] = Cost(max_cost.0 * phony.count_ones().to_f32().unwrap());
         }
         for degree in graph.degrees().rev() {
-            let mut layer: HashSet<_> = graph.layer(degree).collect();
-            let mut parent_layer: HashSet<_> = graph.layer(degree - 1).collect();
-            loop {
-                let switch_candidates: Vec<Intersection> = layer
+            let switch_candidates: Vec<Intersection> = graph
+                .layer(degree)
+                .filter_map(|node| {
+                    if solution.contains(&node) {
+                        graph.parents(node)
+                    //.map(|some| some.iter().filter(|p| parent_layer.contains(p)))
+                    } else {
+                        None
+                    }
+                })
+                .flatten()
+                .cloned()
+                .unique()
+                .collect();
+            let mut best_switch = Switch::default();
+            for candidate_set in power_set_iter(&switch_candidates) {
+                let insert: Vec<_> = candidate_set.cloned().collect();
+                let remove: Vec<_> = insert
                     .iter()
-                    .filter_map(|&node| {
-                        if solution.contains(&node) {
-                            graph
-                                .parents(node)
-                                .map(|some| some.iter().filter(|p| parent_layer.contains(p)))
-                        } else {
-                            None
-                        }
-                    })
-                    .flatten()
+                    .flat_map(|&p| graph.children(p).unwrap_or(&[]))
+                    .filter(|n| solution.contains(n))
                     .cloned()
                     .unique()
                     .collect();
-                let mut best_switch = Switch::default();
-                for candidate_set in power_set_iter(&switch_candidates) {
-                    let insert: Vec<_> = candidate_set.cloned().collect();
-                    let remove: Vec<_> = insert
-                        .iter()
-                        .flat_map(|&p| {
-                            graph
-                                .children(p)
-                                .unwrap_or(&[])
-                                .iter()
-                                .filter(|c| layer.contains(c))
-                        })
-                        .filter(|n| solution.contains(n))
-                        .cloned()
-                        .unique()
-                        .collect();
-                    let gain = remove.iter().map(|&ch| self.cost(ch)).sum::<Cost>()
-                        - insert.iter().map(|&ch| self.cost(ch)).sum::<Cost>();
-                    if gain > best_switch.gain {
-                        best_switch = Switch {
-                            remove,
-                            insert,
-                            gain,
-                        };
-                    }
+                let gain = remove.iter().map(|&ch| self.cost(ch)).sum::<Cost>()
+                    - insert.iter().map(|&ch| self.cost(ch)).sum::<Cost>();
+                if gain > best_switch.gain {
+                    best_switch = Switch {
+                        remove,
+                        insert,
+                        gain,
+                    };
                 }
-                if best_switch.gain > Cost(0_f32) {
-                    for node in best_switch.remove {
-                        solution.remove(&node);
-                        layer.remove(&node);
+            }
+            if best_switch.gain > Cost(0_f32) {
+                for node in best_switch.remove {
+                    solution.remove(&node);
+                }
+                for node in best_switch.insert {
+                    solution.insert(node);
+                }
+            }
+        }
+        let mut solution: Vec<_> = solution.into_iter().collect();
+        solution.sort();
+        solution
+    }
+
+    fn optimize_graph_greedy(&mut self, threshold: Score) -> Vec<Intersection> {
+        let Candidates {
+            all: candidates,
+            leaves,
+            uncovered_classes,
+        } = self.candidates(threshold);
+
+        // These must be covered but cannot be selected.
+        let phony_candidates: HashSet<_> = uncovered_classes
+            .into_iter()
+            .map(|ResultClass(class)| Intersection(class))
+            .collect();
+
+        let graph = Graph::from_iter(
+            candidates
+                .into_iter()
+                .chain(phony_candidates.iter().cloned()),
+        );
+        let mut solution: HashSet<Intersection> = leaves
+            .into_iter()
+            .chain(phony_candidates.iter().cloned())
+            .collect();
+        let &max_cost = self.costs.iter().max().unwrap();
+        for Intersection(phony) in phony_candidates {
+            self.costs[phony as usize] =
+                Cost(max_cost.0 * (1.0 + phony.count_ones().to_f32().unwrap()));
+        }
+        for degree in graph.degrees().rev() {
+            let mut remaining: HashSet<_> = graph
+                .layer(degree)
+                .filter(|c| solution.contains(c))
+                .collect();
+            if remaining.is_empty() {
+                continue;
+            }
+            let mut remaining_parents: HashSet<_> = graph.layer(degree - 1).collect();
+
+            let parents: Vec<_> = graph
+                .layer(degree - 1)
+                .sorted_by(|&Intersection(a), &Intersection(b)| {
+                    self.costs[a as usize].cmp(&self.costs[b as usize])
+                })
+                .collect();
+            for parent in parents {
+                if remaining_parents.contains(&parent) {
+                    if let Some(children) = graph.children(parent) {
+                        let cost_removed = children
+                            .iter()
+                            .filter_map(|c| remaining.get(c).map(|&c| self.cost(c)))
+                            .sum::<Cost>();
+                        let cost_gain = cost_removed - self.cost(parent);
+                        if cost_gain > Cost(0.0) {
+                            solution.insert(parent);
+                            remaining_parents.remove(&parent);
+                            for child in children {
+                                solution.remove(child);
+                                remaining.remove(&child);
+                            }
+                            if remaining.is_empty() || remaining_parents.is_empty() {
+                                break;
+                            }
+                        }
                     }
-                    for node in best_switch.insert {
-                        solution.insert(node);
-                        parent_layer.remove(&node);
-                    }
-                } else {
-                    break;
                 }
             }
         }
@@ -442,7 +498,7 @@ mod test {
     use super::*;
     use proptest::prelude::*;
     use rstest::{fixture, rstest};
-    use OptimizeMethod::{BruteForce, Exact, Graph, Greedy};
+    use OptimizeMethod::{BruteForce, Exact, Graph, GraphGreedy, Greedy};
 
     #[test]
     fn test_new_index() {
@@ -1033,6 +1089,77 @@ mod test {
     }
 
     #[test]
+    fn test_optimize_graph_greedy() {
+        let query_len = 4_u8;
+        let unigrams = (0..query_len)
+            .map(|term| (Intersection(1 << term), Cost(1.0), Score(f32::from(term))))
+            .collect::<Vec<_>>();
+        let mut bigrams: Vec<(Intersection, Cost, Score)> = Vec::new();
+        for left in 0..query_len {
+            for right in (left + 1)..query_len {
+                bigrams.push((
+                    Intersection((1 << left) | (1 << right)),
+                    Cost(0.4),
+                    Score(f32::from(left + right + 1)),
+                ));
+            }
+        }
+        let mut index = Index::new(4, &[unigrams, bigrams]).unwrap();
+
+        assert_eq!(
+            index.optimize(Score(0.0), GraphGreedy),
+            vec![
+                Intersection(0b0001),
+                Intersection(0b0010),
+                Intersection(0b0100),
+                Intersection(0b1000)
+            ]
+        );
+
+        assert_eq!(
+            index.optimize(Score(1.0), GraphGreedy),
+            vec![
+                Intersection(0b0010),
+                Intersection(0b0100),
+                Intersection(0b1000)
+            ]
+        );
+
+        assert_eq!(
+            index.optimize(Score(2.0), GraphGreedy),
+            vec![
+                Intersection(0b0011),
+                Intersection(0b0100),
+                Intersection(0b1000)
+            ]
+        );
+
+        assert_eq!(
+            index.optimize(Score(3.0), GraphGreedy),
+            vec![
+                Intersection(0b0101),
+                Intersection(0b0110),
+                Intersection(0b1000)
+            ]
+        );
+
+        assert_eq!(
+            index.optimize(Score(4.0), GraphGreedy),
+            vec![Intersection(0b0110), Intersection(0b1000)]
+        );
+
+        assert_eq!(
+            index.optimize(Score(5.0), GraphGreedy),
+            vec![Intersection(0b1010), Intersection(0b1100)]
+        );
+
+        assert_eq!(
+            index.optimize(Score(6.0), GraphGreedy),
+            vec![Intersection(0b1100)]
+        );
+    }
+
+    #[test]
     fn test_optimize_method_from_str() {
         assert_eq!(
             "brute-force".parse::<OptimizeMethod>().ok(),
@@ -1041,6 +1168,10 @@ mod test {
         assert_eq!("exact".parse::<OptimizeMethod>().ok(), Some(Exact));
         assert_eq!("greedy".parse::<OptimizeMethod>().ok(), Some(Greedy));
         assert_eq!("graph".parse::<OptimizeMethod>().ok(), Some(Graph));
+        assert_eq!(
+            "graph-greedy".parse::<OptimizeMethod>().ok(),
+            Some(GraphGreedy)
+        );
         assert!("unknown".parse::<OptimizeMethod>().is_err());
     }
 
