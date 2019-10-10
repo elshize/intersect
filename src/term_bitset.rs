@@ -4,6 +4,7 @@ use num::ToPrimitive;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::str::FromStr;
 
 /// The underlying type of the mask used by the term bag.
@@ -129,9 +130,15 @@ impl Iterator for ClassComponents {
 /// explicitly by the user.
 /// The relations between result classes and intersections are not symmetric,
 /// hence different type to avoid mistakes.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Intersection(pub TermMask);
+
+impl fmt::Debug for Intersection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Intersection({:08b})", self.0)
+    }
+}
 
 impl FromStr for Intersection {
     type Err = Error;
