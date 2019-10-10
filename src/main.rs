@@ -24,6 +24,9 @@ struct Args {
     /// having max a given number of terms.
     #[structopt(long = "max")]
     max_terms: Option<u32>,
+    /// Print out only the intersection values, space-separated, one query per line.
+    #[structopt(long = "terse")]
+    terse: bool,
 }
 
 fn split_columns<'a>(
@@ -112,14 +115,24 @@ fn main(args: Args) -> Result<(), Error> {
             .ok_or_else(|| format_err!("Missing threshold for query: {}", query))?;
         let mut optimal = index.optimize(threshold, args.method);
         optimal.sort();
-        for inter in optimal {
+        if args.terse {
             println!(
-                "{1}{0}{2}{0}{3}",
-                &args.separator,
-                query,
-                inter.0,
-                index.cost(inter).0,
+                "{}",
+                optimal
+                    .into_iter()
+                    .map(|Intersection(num)| num.to_string())
+                    .format(" ")
             );
+        } else {
+            for inter in optimal {
+                println!(
+                    "{1}{0}{2}{0}{3}",
+                    &args.separator,
+                    query,
+                    inter.0,
+                    index.cost(inter).0,
+                );
+            }
         }
     }
     Ok(())
