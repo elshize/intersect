@@ -1,7 +1,7 @@
 use crate::graph::Graph;
 use crate::power_set::power_set_iter;
 use crate::set_cover::{greedy_set_cover, set_cover};
-use crate::{Cost, Intersection, ResultClass, Score, MAX_LIST_COUNT};
+use crate::{Cost, Intersection, ResultClass, Score, TermMask, MAX_LIST_COUNT};
 use failure::{bail, format_err, Error};
 use itertools::Itertools;
 use num::ToPrimitive;
@@ -152,9 +152,7 @@ impl Index {
         query_len: u8,
         posting_lists: &[Vec<(Intersection, Cost, Score)>],
     ) -> Result<Self, Error> {
-        let max_class = 2_u16
-            .pow(u32::from(query_len))
-            .to_u8()
+        let max_class: TermMask = num::cast::NumCast::from(2_u16.pow(u32::from(query_len)))
             .ok_or_else(|| format_err!("Query too long"))?;
         let mut costs = [Cost::default(); MAX_LIST_COUNT];
         let mut upper_bounds = [Score::default(); MAX_LIST_COUNT];
@@ -1179,9 +1177,9 @@ mod test {
 
         #[test]
         fn index_from_iter(
-            unigrams in prop::sample::subsequence(vec![0b001_u8, 0b010_u8, 0b100_u8], 3)
+            unigrams in prop::sample::subsequence(vec![0b001, 0b010, 0b100], 3)
                 .prop_filter("Must have at least one unigram", |v| !v.is_empty()),
-            bigrams in prop::sample::subsequence(vec![0b011_u8, 0b110_u8, 0b101_u8], 3),
+            bigrams in prop::sample::subsequence(vec![0b011, 0b110, 0b101], 3),
         ) {
             let transform = |v: Vec<_>| -> Vec<_> {
                 v
@@ -1193,7 +1191,7 @@ mod test {
             };
             let unigrams: Vec<_> = transform(unigrams);
             let bigrams: Vec<_> = transform(bigrams);
-            let trigrams: Vec<_> = transform(vec![0b111_u8]);
+            let trigrams: Vec<_> = transform(vec![0b111]);
             let levels: Vec<Vec<(Intersection, Cost, Score)>> = vec![
                 unigrams,
                 bigrams,
