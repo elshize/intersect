@@ -187,6 +187,14 @@ impl Index {
         })
     }
 
+    /// Scale costs depending on arity.
+    pub fn scale_costs(&mut self, factor: f32) {
+        for (mask, cost) in self.costs.iter_mut().enumerate() {
+            let arity = mask.count_ones();
+            *cost = Cost(cost.0 * factor.powf(arity as f32));
+        }
+    }
+
     /// Cost of a given intersection.
     pub fn cost(&self, intersection: Intersection) -> Cost {
         let idx: usize = intersection.into();

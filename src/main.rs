@@ -27,6 +27,12 @@ struct Args {
     /// Print out only the intersection values, space-separated, one query per line.
     #[structopt(long = "terse")]
     terse: bool,
+    /// Scale costs by this factor.
+    #[structopt(long = "scale", conflicts_with = "scale-by-query-len")]
+    scale: Option<f32>,
+    /// Scale costs by this factor.
+    #[structopt(long = "scale-by-query-len", conflicts_with = "scale")]
+    scale_by_query_length: bool,
 }
 
 fn split_columns<'a>(
@@ -110,6 +116,11 @@ fn main(args: Args) -> Result<(), Error> {
         } else {
             Index::from_iter(iter)
         };
+        if let Some(factor) = args.scale {
+            index.scale_costs(factor);
+        } else if args.scale_by_query_length {
+            index.scale_costs(index.query_len as f32);
+        }
         let &threshold = thresholds
             .get(&query)
             .ok_or_else(|| format_err!("Missing threshold for query: {}", query))?;
