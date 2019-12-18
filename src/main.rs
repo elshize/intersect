@@ -27,6 +27,9 @@ struct Args {
     /// Print out only the intersection values, space-separated, one query per line.
     #[structopt(long = "terse")]
     terse: bool,
+    /// Times each selection instead of printing the result.
+    #[structopt(long = "time", conflicts_with = "terse")]
+    time: bool,
     /// Scale costs by this factor.
     #[structopt(long = "scale", conflicts_with = "scale-by-query-len")]
     scale: Option<f32>,
@@ -124,9 +127,13 @@ fn main(args: Args) -> Result<(), Error> {
         let &threshold = thresholds
             .get(&query)
             .ok_or_else(|| format_err!("Missing threshold for query: {}", query))?;
+        let now = std::time::Instant::now();
         let mut optimal = index.optimize(threshold, args.method);
+        let elapsed = now.elapsed().as_micros();
         optimal.sort();
-        if args.terse {
+        if args.time {
+            println!("{}", elapsed);
+        } else if args.terse {
             println!(
                 "{}",
                 optimal
