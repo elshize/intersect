@@ -1,7 +1,6 @@
 use crate::{Query, Term};
 use failure::{format_err, Error, ResultExt};
 use num::ToPrimitive;
-#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -42,8 +41,7 @@ fn term_mask_from_str(index: &str) -> Result<TermMask, Error> {
 /// For example, in a 3-term query, the class `100` includes all documents containing
 /// **only** the first term, while the class `111` includes the documents containing
 /// all three terms.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ResultClass(pub TermMask);
 
 impl FromStr for ResultClass {
@@ -130,8 +128,7 @@ impl Iterator for ClassComponents {
 /// explicitly by the user.
 /// The relations between result classes and intersections are not symmetric,
 /// hence different type to avoid mistakes.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Intersection(pub TermMask);
 
 impl fmt::Debug for Intersection {

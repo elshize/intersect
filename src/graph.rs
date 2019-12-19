@@ -8,7 +8,6 @@
 
 use crate::{Intersection, TermMask};
 use failure::{format_err, Error};
-#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -18,8 +17,7 @@ use std::iter::FromIterator;
 ///
 /// E.g., an intersection of 3 terms is of degree 3,
 /// while a single posting list is of degree 1.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Serialize, Deserialize)]
 pub struct Degree(pub TermMask);
 
 impl std::ops::Add<TermMask> for Degree {
@@ -47,8 +45,7 @@ impl TryFrom<u32> for Degree {
 }
 
 /// Represents a graph formed by posting lists. See [`graph`](index.html) module.
-#[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Graph {
     nodes: Vec<Vec<Intersection>>,
     parents: Vec<Vec<Intersection>>,

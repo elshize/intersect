@@ -5,6 +5,7 @@ use crate::{Cost, Intersection, ResultClass, Score, TermMask, MAX_LIST_COUNT};
 use failure::{bail, format_err, Error};
 use itertools::Itertools;
 use num::ToPrimitive;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::convert::{Into, TryInto};
 use std::iter::FromIterator;
@@ -499,6 +500,48 @@ impl FromIterator<(Intersection, Cost, Score)> for Index {
     }
 }
 
+/// Describes intersection as given at the program input.
+#[derive(Serialize, Deserialize)]
+pub struct IntersectionInput {
+    /// Intersection mask.
+    pub intersection: Intersection,
+    /// Intersection cost, e.g., number of postings.
+    pub cost: Cost,
+    /// Maximum score of a document in the intersection.
+    pub max_score: Score,
+}
+
+impl FromIterator<IntersectionInput> for Index {
+    fn from_iter<T: IntoIterator<Item = IntersectionInput>>(iter: T) -> Self {
+        let mut query_len = 0_u8;
+        let mut posting_lists: Vec<Vec<(Intersection, Cost, Score)>> = Vec::new();
+        for IntersectionInput {
+            intersection,
+            cost,
+            max_score,
+        } in iter
+        {
+            let len = intersection
+                .0
+                .trailing_zeros()
+                .to_u8()
+                .expect("Unable to cast u32 to u8")
+                + 1;
+            query_len = std::cmp::max(query_len, len);
+            let level = intersection.0.count_ones() as usize;
+            if posting_lists.len() < level {
+                posting_lists.resize_with(level, Default::default);
+            }
+            posting_lists[level.checked_sub(1).expect("Intersection cannot be 0")].push((
+                intersection,
+                cost,
+                max_score,
+            ));
+        }
+        Self::new(query_len, &posting_lists).expect("Unable to create index")
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -506,7 +549,7 @@ mod test {
     use rstest::{fixture, rstest};
     use OptimizeMethod::{BruteForce, Exact, Graph, GraphGreedy, Greedy};
 
-    #[test]
+    //#[test]
     fn test_new_index() {
         let index = Index::new(0, &[]).unwrap();
         assert!(index.degrees.is_empty());

@@ -13,6 +13,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::iter::Iterator;
 use std::ops::Deref;
@@ -24,7 +25,7 @@ mod term_bitset;
 pub use term_bitset::{Intersection, ResultClass, TermMask};
 
 mod index;
-pub use index::{Index, OptimizeMethod};
+pub use index::{Index, IntersectionInput, OptimizeMethod};
 
 mod set_cover;
 pub use set_cover::set_cover;
@@ -46,7 +47,7 @@ const QUERY_LEN_EXCEEDED: &str = &"Max query len exceeded";
 pub struct Term(pub u32);
 
 /// Represents a cost of processing a certain intersection of terms.
-#[derive(Clone, Copy, Debug, Default, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, PartialOrd, Serialize, Deserialize)]
 pub struct Cost(pub f32);
 
 impl Ord for Cost {
@@ -89,7 +90,7 @@ impl std::ops::Sub for Cost {
 }
 
 /// Score representation
-#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Score(pub f32);
 
 impl std::iter::Sum<Self> for Score {

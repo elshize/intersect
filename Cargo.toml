@@ -11,7 +11,8 @@ name = "intersect"
 num = "0.2"
 failure = "0.1"
 ordered-float = "1.0"
-serde = { version = "1.0", optional = true, features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 itertools = "0.8"
 structopt = { version = "0.3", features = [ "paw" ] }
 paw = "1"
