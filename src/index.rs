@@ -1,10 +1,11 @@
 use crate::graph::Graph;
 use crate::power_set::power_set_iter;
 use crate::set_cover::{greedy_set_cover, set_cover};
-use crate::{Cost, Intersection, ResultClass, Score, MAX_LIST_COUNT};
+use crate::{Cost, Intersection, ResultClass, Score, TermMask, MAX_LIST_COUNT};
 use failure::{bail, format_err, Error};
 use itertools::Itertools;
 use num::ToPrimitive;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::convert::{Into, TryInto};
 use std::iter::FromIterator;
@@ -152,9 +153,7 @@ impl Index {
         query_len: u8,
         posting_lists: &[Vec<(Intersection, Cost, Score)>],
     ) -> Result<Self, Error> {
-        let max_class = 2_u16
-            .pow(u32::from(query_len))
-            .to_u8()
+        let max_class: TermMask = num::cast::NumCast::from(2_u16.pow(u32::from(query_len)))
             .ok_or_else(|| format_err!("Query too long"))?;
         let mut costs = [Cost::default(); MAX_LIST_COUNT];
         let mut upper_bounds = [Score::default(); MAX_LIST_COUNT];
@@ -187,6 +186,14 @@ impl Index {
             upper_bounds,
             query_len,
         })
+    }
+
+    /// Scale costs depending on arity.
+    pub fn scale_costs(&mut self, factor: f32) {
+        for (mask, cost) in self.costs.iter_mut().enumerate() {
+            let arity = mask.count_ones();
+            *cost = Cost(cost.0 * factor.powf(arity as f32));
+        }
     }
 
     /// Cost of a given intersection.
@@ -493,6 +500,48 @@ impl FromIterator<(Intersection, Cost, Score)> for Index {
     }
 }
 
+/// Describes intersection as given at the program input.
+#[derive(Serialize, Deserialize)]
+pub struct IntersectionInput {
+    /// Intersection mask.
+    pub intersection: Intersection,
+    /// Intersection cost, e.g., number of postings.
+    pub cost: Cost,
+    /// Maximum score of a document in the intersection.
+    pub max_score: Score,
+}
+
+impl FromIterator<IntersectionInput> for Index {
+    fn from_iter<T: IntoIterator<Item = IntersectionInput>>(iter: T) -> Self {
+        let mut query_len = 0_u8;
+        let mut posting_lists: Vec<Vec<(Intersection, Cost, Score)>> = Vec::new();
+        for IntersectionInput {
+            intersection,
+            cost,
+            max_score,
+        } in iter
+        {
+            let len = intersection
+                .0
+                .trailing_zeros()
+                .to_u8()
+                .expect("Unable to cast u32 to u8")
+                + 1;
+            query_len = std::cmp::max(query_len, len);
+            let level = intersection.0.count_ones() as usize;
+            if posting_lists.len() < level {
+                posting_lists.resize_with(level, Default::default);
+            }
+            posting_lists[level.checked_sub(1).expect("Intersection cannot be 0")].push((
+                intersection,
+                cost,
+                max_score,
+            ));
+        }
+        Self::new(query_len, &posting_lists).expect("Unable to create index")
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -500,7 +549,7 @@ mod test {
     use rstest::{fixture, rstest};
     use OptimizeMethod::{BruteForce, Exact, Graph, GraphGreedy, Greedy};
 
-    #[test]
+    //#[test]
     fn test_new_index() {
         let index = Index::new(0, &[]).unwrap();
         assert!(index.degrees.is_empty());
@@ -1179,9 +1228,9 @@ mod test {
 
         #[test]
         fn index_from_iter(
-            unigrams in prop::sample::subsequence(vec![0b001_u8, 0b010_u8, 0b100_u8], 3)
+            unigrams in prop::sample::subsequence(vec![0b001, 0b010, 0b100], 3)
                 .prop_filter("Must have at least one unigram", |v| !v.is_empty()),
-            bigrams in prop::sample::subsequence(vec![0b011_u8, 0b110_u8, 0b101_u8], 3),
+            bigrams in prop::sample::subsequence(vec![0b011, 0b110, 0b101], 3),
         ) {
             let transform = |v: Vec<_>| -> Vec<_> {
                 v
@@ -1193,7 +1242,7 @@ mod test {
             };
             let unigrams: Vec<_> = transform(unigrams);
             let bigrams: Vec<_> = transform(bigrams);
-            let trigrams: Vec<_> = transform(vec![0b111_u8]);
+            let trigrams: Vec<_> = transform(vec![0b111]);
             let levels: Vec<Vec<(Intersection, Cost, Score)>> = vec![
                 unigrams,
                 bigrams,

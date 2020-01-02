@@ -8,8 +8,6 @@
 
 use crate::{Intersection, TermMask};
 use failure::{format_err, Error};
-use num::cast::ToPrimitive;
-#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -19,20 +17,19 @@ use std::iter::FromIterator;
 ///
 /// E.g., an intersection of 3 terms is of degree 3,
 /// while a single posting list is of degree 1.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct Degree(pub u8);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Serialize, Deserialize)]
+pub struct Degree(pub TermMask);
 
-impl std::ops::Add<u8> for Degree {
+impl std::ops::Add<TermMask> for Degree {
     type Output = Self;
-    fn add(self, rhs: u8) -> Self::Output {
+    fn add(self, rhs: TermMask) -> Self::Output {
         Self(self.0 + rhs)
     }
 }
 
-impl std::ops::Sub<u8> for Degree {
+impl std::ops::Sub<TermMask> for Degree {
     type Output = Self;
-    fn sub(self, rhs: u8) -> Self::Output {
+    fn sub(self, rhs: TermMask) -> Self::Output {
         Self(self.0 - rhs)
     }
 }
@@ -42,16 +39,13 @@ impl TryFrom<u32> for Degree {
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         Ok(Self(
-            value
-                .to_u8()
-                .ok_or_else(|| format_err!("Degree too high"))?,
+            num::cast::NumCast::from(value).ok_or_else(|| format_err!("Degree too high"))?,
         ))
     }
 }
 
 /// Represents a graph formed by posting lists. See [`graph`](index.html) module.
-#[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Graph {
     nodes: Vec<Vec<Intersection>>,
     parents: Vec<Vec<Intersection>>,
@@ -60,10 +54,10 @@ pub struct Graph {
 
 impl FromIterator<Intersection> for Graph {
     fn from_iter<I: IntoIterator<Item = Intersection>>(iter: I) -> Self {
-        let mut node_map: HashMap<u8, Vec<Intersection>> = HashMap::new();
-        let mut max_degree = 0_u8;
+        let mut node_map: HashMap<TermMask, Vec<Intersection>> = HashMap::new();
+        let mut max_degree: TermMask = 0;
         for intersection in iter {
-            let degree = intersection.degree().to_u8().unwrap();
+            let degree = intersection.degree() as TermMask;
             node_map.entry(degree).or_default().push(intersection);
             max_degree = std::cmp::max(degree, max_degree);
         }
@@ -76,8 +70,8 @@ impl FromIterator<Intersection> for Graph {
 }
 
 struct ParentsGenerator {
-    node: u8,
-    recipe: u8,
+    node: TermMask,
+    recipe: TermMask,
 }
 
 impl ParentsGenerator {
@@ -107,7 +101,7 @@ impl Iterator for ParentsGenerator {
 
 impl Graph {
     /// Constructs a full graph having all n-grams up to a given degree.
-    pub fn full(nterms: u8, max_degree: Degree) -> Result<Self, Error> {
+    pub fn full(nterms: TermMask, max_degree: Degree) -> Result<Self, Error> {
         let Degree(max_degree) = max_degree;
         if max_degree > nterms {
             return Err(format_err!("Degree must be at most number of terms"));
@@ -214,13 +208,13 @@ impl Graph {
 
     /// Returns the highest degree in the graph.
     pub fn max_degree(&self) -> Degree {
-        Degree(self.nodes.len().to_u8().unwrap() - 1)
+        Degree(self.nodes.len() as TermMask - 1)
     }
 
     /// Iterate over available degrees, starting from 1, up to and including
     /// [`max_degree()`](#method.max_degree).
     pub fn degrees(&self) -> impl DoubleEndedIterator<Item = Degree> {
-        (1..self.nodes.len().to_u8().unwrap()).map(Degree)
+        (1..self.nodes.len() as TermMask).map(Degree)
     }
 
     /// Returns the layer of the highest degree and that degree.
@@ -600,7 +594,7 @@ mod test {
         }
         #[test]
         fn add_to_degree(d in 0_u8..100, x in 0_u8..100) {
-            assert_eq!(Degree(d) + x, Degree(d + x));
+            assert_eq!(Degree(d as TermMask) + x as TermMask, Degree((d + x) as TermMask));
         }
     }
 }

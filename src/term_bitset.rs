@@ -1,7 +1,6 @@
 use crate::{Query, Term};
 use failure::{format_err, Error, ResultExt};
 use num::ToPrimitive;
-#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -11,7 +10,7 @@ use std::str::FromStr;
 ///
 /// In this representation, n-th bit represents the n-th term, and
 /// is equal to 1 if it's present, and 0 if it's missing.
-pub type TermMask = u8;
+pub type TermMask = u16;
 
 fn term_mask_from_query(query: &Query, term_subset: &[Term]) -> Result<TermMask, Error> {
     let mut mask: TermMask = 0;
@@ -30,7 +29,7 @@ fn term_mask_from_query(query: &Query, term_subset: &[Term]) -> Result<TermMask,
 }
 
 fn term_mask_from_str(index: &str) -> Result<TermMask, Error> {
-    let num = u8::from_str_radix(index, 2)
+    let num = TermMask::from_str_radix(index, 2)
         .with_context(|_| format!("Invalid bitset string: {}", index))?;
     Ok(num)
 }
@@ -42,8 +41,7 @@ fn term_mask_from_str(index: &str) -> Result<TermMask, Error> {
 /// For example, in a 3-term query, the class `100` includes all documents containing
 /// **only** the first term, while the class `111` includes the documents containing
 /// all three terms.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ResultClass(pub TermMask);
 
 impl FromStr for ResultClass {
@@ -66,10 +64,10 @@ impl ResultClass {
     ///
     /// # Examples
     /// ```
-    /// # use intersect::ResultClass;
+    /// # use intersect::{ResultClass, TermMask};
     /// assert_eq!(
-    ///     ResultClass::all(2).map(|ResultClass(c)| c).collect::<Vec<u8>>(),
-    ///     vec![0_u8, 1, 2, 3]
+    ///     ResultClass::all(2).map(|ResultClass(c)| c).collect::<Vec<TermMask>>(),
+    ///     vec![0, 1, 2, 3]
     /// );
     /// ```
     pub fn all(len: u8) -> impl Iterator<Item = Self> {
@@ -130,8 +128,7 @@ impl Iterator for ClassComponents {
 /// explicitly by the user.
 /// The relations between result classes and intersections are not symmetric,
 /// hence different type to avoid mistakes.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Intersection(pub TermMask);
 
 impl fmt::Debug for Intersection {
