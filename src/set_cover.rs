@@ -108,7 +108,7 @@ mod test {
 
     #[test]
     fn test_set_cover() {
-        assert_eq!(set_cover(4_u8, &[(0, vec![], 0.1)]), vec![]);
+        assert_eq!(set_cover(4_u8, &[(0, vec![], 0.1)]), Vec::<u8>::new());
         assert_eq!(set_cover(4_u8, &[(0, vec![0, 1, 2, 3], 0.1)]), &[0]);
         assert_eq!(
             set_cover(
@@ -125,7 +125,10 @@ mod test {
 
     #[test]
     fn test_greedy_set_cover() {
-        assert_eq!(greedy_set_cover(4, &[(0, vec![], 0.1)]), vec![]);
+        assert_eq!(
+            greedy_set_cover(4, &[(0, vec![], 0.1)]),
+            Vec::<usize>::new()
+        );
         assert_eq!(greedy_set_cover(4, &[(0, vec![0, 1, 2, 3], 0.1)]), &[0]);
         assert_eq!(
             greedy_set_cover(

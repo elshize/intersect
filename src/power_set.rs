@@ -1,6 +1,7 @@
 use num::cast::{FromPrimitive, ToPrimitive};
 use num::{One, PrimInt, Unsigned, Zero};
 
+#[derive(Clone, Copy)]
 pub struct SubsetIter<'a, T, U> {
     mask: U,
     slice: &'a [T],

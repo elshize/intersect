@@ -34,7 +34,7 @@ pub mod graph;
 pub use graph::Graph;
 
 /// The maximum length of a query that can be used for the algorithm.
-pub const MAX_QUERY_LEN: usize = std::mem::size_of::<TermMask>() * 8 - 1;
+pub const MAX_QUERY_LEN: usize = std::mem::size_of::<TermMask>() * 8;
 
 /// The maximum number of posting lists supported by the algorithm.
 /// Depends on the maximum query length.
@@ -90,8 +90,22 @@ impl std::ops::Sub for Cost {
 }
 
 /// Score representation
-#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialOrd, Serialize, Deserialize)]
 pub struct Score(pub f32);
+
+impl Ord for Score {
+    fn cmp(&self, other: &Self) -> Ordering {
+        OrderedFloat(self.0).cmp(&OrderedFloat(other.0))
+    }
+}
+
+impl PartialEq for Score {
+    fn eq(&self, other: &Self) -> bool {
+        OrderedFloat(self.0).eq(&OrderedFloat(other.0))
+    }
+}
+
+impl Eq for Score {}
 
 impl std::iter::Sum<Self> for Score {
     fn sum<I>(iter: I) -> Self
