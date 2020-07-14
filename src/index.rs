@@ -130,6 +130,14 @@ pub enum OptimizeMethod {
     /// Similar to graph, but faster by greedily selecting parents with smallest costs.
     /// (Is it equivalent to `Graph`?)
     GraphGreedy,
+    /// Selects only among single-term lists. This is very fast (linear in number of terms),
+    /// and can be easily used to compare with a result of an approximate selection, such as
+    /// `Greedy` or `GraphGreedy` to see if the cost is lower by using only unigrams.
+    Unigram,
+    /// This one assumes we only have unigrams and bigrams available.
+    /// Furthermore, it is meant to be optimized for when there are relatively few bigrams
+    /// (which usually will be true, at least in certain scenarios).
+    Bigram,
 }
 
 impl FromStr for OptimizeMethod {
@@ -142,6 +150,8 @@ impl FromStr for OptimizeMethod {
             "greedy" => Ok(Self::Greedy),
             "graph" => Ok(Self::Graph),
             "graph-greedy" => Ok(Self::GraphGreedy),
+            "unigram" => Ok(Self::Unigram),
+            "bigram" => Ok(Self::Bigram),
             method => bail!("Invalid optimize method: {}", method),
         }
     }
@@ -153,8 +163,8 @@ impl Index {
         query_len: u8,
         posting_lists: &[Vec<(Intersection, Cost, Score)>],
     ) -> Result<Self, Error> {
-        let max_class: TermMask = num::cast::NumCast::from(2_u16.pow(u32::from(query_len)))
-            .ok_or_else(|| format_err!("Query too long"))?;
+        let max_class: TermMask = num::cast::NumCast::from(2_u16.pow(u32::from(query_len)) - 1)
+            .ok_or_else(|| format_err!("Query too long: {}", query_len))?;
         let mut costs = [Cost::default(); MAX_LIST_COUNT];
         let mut upper_bounds = [Score::default(); MAX_LIST_COUNT];
         let mut degrees: Vec<Vec<Intersection>> = Vec::new();
@@ -202,16 +212,294 @@ impl Index {
         self.costs[idx]
     }
 
+    /// Cost of a given intersection.
+    pub fn upper_bound(&self, intersection: Intersection) -> Score {
+        let idx: usize = intersection.into();
+        self.upper_bounds[idx]
+    }
+
+    /// Returns all essential classes, i.e., those that are above a given threshold.
+    pub fn essential_ngram_classes(&self, threshold: Score, min_degree: u32) -> Vec<ResultClass> {
+        ResultClass::all(self.query_len)
+            .filter(|&ResultClass(mask)| {
+                Intersection(mask).degree() >= min_degree
+                    && self.upper_bounds[mask as usize] >= threshold
+            })
+            .collect()
+    }
+
     /// Select optimal set of posting lists for query execution.
     pub fn optimize(&mut self, threshold: Score, method: OptimizeMethod) -> Vec<Intersection> {
         match method {
             OptimizeMethod::BruteForce => self.optimize_brute_force(threshold),
-            OptimizeMethod::Exact => self.optimize_exact(threshold),
+            OptimizeMethod::Exact => {
+                if self.query_length() < 7 {
+                    self.optimize_exact(threshold)
+                } else {
+                    self.optimize(threshold, OptimizeMethod::Bigram)
+                }
+            }
             OptimizeMethod::Greedy => self.optimize_greedy(threshold),
             OptimizeMethod::Graph => self.optimize_graph(threshold),
             OptimizeMethod::GraphGreedy => self.optimize_graph_greedy(threshold),
+            OptimizeMethod::Unigram => self.optimize_unigram(threshold),
+            OptimizeMethod::Bigram => self.optimize_bigram(threshold),
         }
     }
+
+    fn full_cost<'a, I: IntoIterator<Item = &'a Intersection>>(&'a self, selection: I) -> Cost {
+        selection.into_iter().map(|&i| self.cost(i)).sum()
+    }
+
+    /// First optimizes using `method`, and then runs `OptimizeMethod::Unigram` and returns
+    /// the one with lower cost.
+    pub fn optimize_or_unigram(
+        &mut self,
+        threshold: Score,
+        method: OptimizeMethod,
+    ) -> Vec<Intersection> {
+        match method {
+            OptimizeMethod::Unigram | OptimizeMethod::Bigram => self.optimize(threshold, method),
+            OptimizeMethod::Greedy
+            | OptimizeMethod::BruteForce
+            | OptimizeMethod::Exact
+            | OptimizeMethod::Graph
+            | OptimizeMethod::GraphGreedy => {
+                let approx = self.optimize(threshold, method);
+                let unigram = self.optimize_unigram(threshold);
+                if self.full_cost(&unigram) < self.full_cost(&approx) {
+                    unigram
+                } else {
+                    approx
+                }
+            }
+        }
+    }
+
+    fn optimize_unigram(&self, threshold: Score) -> Vec<Intersection> {
+        let mut unigrams: Vec<_> = self.degrees[0].iter().copied().collect();
+        unigrams.sort_unstable_by_key(|&i| self.upper_bound(i));
+        let mut sum = 0.0;
+        let mut num_non_essential = 0;
+        for bound in unigrams.iter().map(|&i| self.upper_bound(i)) {
+            sum += bound.0;
+            if sum > threshold.0 {
+                break;
+            }
+            num_non_essential += 1;
+        }
+        unigrams[num_non_essential..].iter().copied().collect()
+    }
+
+    ///// Checks if a given bigram covers all essential classes of the given unigrams.
+    ///// This means that `bigram` can replace `unigrams` safely.
+    //fn bigram_covers_unigrams(
+    //    essential_classes: &[ResultClass],
+    //    removed: &[Intersection],
+    //    remaining: &[Intersection],
+    //) -> bool {
+    //    essential_classes
+    //        .iter()
+    //        .all(|&c| remaining.iter().any(|u| u.covers(c)) || !removed.iter().any(|u| u.covers(c)))
+    //}
+
+    ///// For a given `bigram`, it returns a list of unigrams it can safely replace,
+    ///// along with the gain of such replacement.
+    ///// If no such replacement is possible, `None` is returned.
+    //fn replacement(
+    //    &self,
+    //    graph: &Graph,
+    //    bigram: Intersection,
+    //    selected_bigrams: &[Intersection],
+    //    available_unigrams: &HashSet<Intersection>,
+    //    essential_classes: &[ResultClass],
+    //    threshold: Score,
+    //) -> Option<(Intersection, Vec<Intersection>, Cost)> {
+    //    if let Some(remaining) = graph.parents(bigram) {
+    //        // TODO: not enough to look at the parents, have to also include other unigrams
+    //        // in the `bigram_covers_unigrams` check.
+    //        let (removed, mut remaining): (Vec<_>, Vec<_>) = remaining
+    //            .iter()
+    //            .copied()
+    //            .partition(|&u| available_unigrams.contains(&u) && self.upper_bound(u) < threshold);
+    //        eprintln!("(removed, remaining) = ({:?}, {:?})", &removed, &remaining);
+    //        let remaining: Vec<_> = remaining
+    //            .drain(..)
+    //            .chain(selected_bigrams.iter().copied())
+    //            .chain(std::iter::once(bigram))
+    //            .collect();
+    //        if removed.is_empty()
+    //            || !Self::bigram_covers_unigrams(&essential_classes, &removed, &remaining)
+    //        {
+    //            eprintln!(
+    //                "bigram {:?} not considered; removed: {:?}; remaining: {:?}; essential classes: {:?}",
+    //                &bigram, &removed, &remaining, &essential_classes
+    //            );
+    //            //eprintln!(
+    //            //    "{:?} | {:?}",
+    //            //    bigram.covers(essential_classes[0]),
+    //            //    Self::bigram_covers_unigrams(&essential_classes, &unigrams, bigram)
+    //            //);
+    //            None
+    //        } else {
+    //            let gain = self.full_cost(&removed) - self.cost(bigram);
+    //            Some((bigram, removed, gain))
+    //        }
+    //    } else {
+    //        None
+    //    }
+    //}
+
+    fn solution_after_replacement(
+        &self,
+        graph: &Graph,
+        bigrams: Vec<Intersection>,
+        remaining_unigrams: &HashSet<Intersection>,
+        threshold: Score,
+        mut solution: HashSet<Intersection>,
+        essential_classes: &[ResultClass],
+    ) -> Option<(Vec<Intersection>, HashSet<Intersection>, Cost)> {
+        let is_live = |&u: &Intersection| -> bool {
+            remaining_unigrams.contains(&u) && self.upper_bound(u) < threshold
+        };
+        match bigrams
+            .iter()
+            .copied()
+            .filter_map(|bigram| {
+                graph
+                    .parents(bigram)
+                    .map(|unigrams| unigrams.iter().copied().filter(is_live).collect::<Vec<_>>())
+            })
+            .flatten()
+            .collect::<HashSet<_>>()
+        {
+            //None => None,
+            v if v.is_empty() => None,
+            replaced_unigrams => {
+                for u in &replaced_unigrams {
+                    solution.remove(u);
+                }
+                for &bigram in &bigrams {
+                    solution.insert(bigram);
+                }
+                if essential_classes
+                    .iter()
+                    .all(|&c| solution.iter().any(|u| u.covers(c)))
+                {
+                    let gain = self.full_cost(&replaced_unigrams) - self.full_cost(&bigrams);
+                    if gain > Cost(0.0) {
+                        Some((bigrams, solution, gain))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn optimize_bigram(&self, threshold: Score) -> Vec<Intersection> {
+        let essential_unigrams = self.optimize_unigram(threshold);
+        if let Some(mut bigrams) = self
+            .degrees
+            .get(1)
+            .map(|b| b.iter().copied().collect::<HashSet<_>>())
+        {
+            let essential_classes = self.essential_ngram_classes(threshold, 2);
+            let graph = Graph::from_iter(essential_unigrams.iter().chain(bigrams.iter()).copied());
+            let mut remaining_unigrams: HashSet<_> = essential_unigrams.into_iter().collect();
+            let mut solution: HashSet<_> = remaining_unigrams.clone();
+            //let max_unigram_cost = remaining_unigrams
+            //    .iter()
+            //    .map(|&u| self.cost(u))
+            //    .max()
+            //    .unwrap();
+            //let x = power_set_iter(&bigrams.iter().copied().collect::<Vec<_>>())
+            //    .filter(|&subset| self.full_cost(subset) < max_unigram_cost)
+            //    .count();
+            //println!("Subsets to check: {}", x);
+            while !remaining_unigrams.is_empty() && !bigrams.is_empty() {
+                if let Some((selected, new_solution, _)) = bigrams
+                    .iter()
+                    .copied()
+                    .map(|b| vec![b])
+                    .chain(bigrams.iter().copied().combinations(2))
+                    //.chain(bigrams.iter().copied().combinations(3))
+                    .filter_map(|b| {
+                        self.solution_after_replacement(
+                            &graph,
+                            b,
+                            &remaining_unigrams,
+                            threshold,
+                            solution.clone(),
+                            &essential_classes,
+                        )
+                    })
+                    .max_by_key(|&(_, _, gain)| gain)
+                {
+                    solution = new_solution;
+                    remaining_unigrams = solution
+                        .iter()
+                        .copied()
+                        .filter(|i| i.0.count_ones() == 1)
+                        .collect();
+                    for bigram in selected {
+                        bigrams.remove(&bigram);
+                    }
+                } else {
+                    break;
+                }
+            }
+            solution.into_iter().collect()
+        } else {
+            essential_unigrams
+        }
+    }
+
+    //fn optimize_bigram_(&self, threshold: Score) -> Vec<Intersection> {
+    //    let essential_unigrams = self.optimize_unigram(threshold);
+    //    if let Some(bigrams) = self.degrees.get(1) {
+    //        let essential_classes = self.essential_ngram_classes(threshold, 2);
+    //        let mut remaining_unigrams: HashSet<_> = essential_unigrams.iter().copied().collect();
+    //        let graph = Graph::from_iter(essential_unigrams.iter().chain(bigrams.iter()).copied());
+    //        let mut bigram_candidates: HashSet<_> = bigrams.iter().copied().collect();
+    //        let mut selected_bigrams: Vec<Intersection> = Vec::new();
+    //        while !remaining_unigrams.is_empty() && !bigram_candidates.is_empty() {
+    //            if let Some((bigram, unigrams, gain)) = bigram_candidates
+    //                .iter()
+    //                .filter_map(|&bigram| {
+    //                    self.replacement(
+    //                        &graph,
+    //                        bigram,
+    //                        &selected_bigrams,
+    //                        &remaining_unigrams,
+    //                        &essential_classes,
+    //                        threshold,
+    //                    )
+    //                })
+    //                .max_by_key(|&(_, _, gain)| gain)
+    //            {
+    //                if gain <= Cost(0.0) {
+    //                    break;
+    //                }
+    //                for unigram in unigrams {
+    //                    remaining_unigrams.remove(&unigram);
+    //                }
+    //                bigram_candidates.remove(&bigram);
+    //                selected_bigrams.push(bigram);
+    //            } else {
+    //                break;
+    //            }
+    //        }
+    //        remaining_unigrams
+    //            .into_iter()
+    //            .chain(selected_bigrams.into_iter())
+    //            .collect()
+    //    } else {
+    //        essential_unigrams
+    //    }
+    //}
 
     fn optimize_brute_force(&self, threshold: Score) -> Vec<Intersection> {
         let classes = ResultClass::all_to_vec(self.query_len);
@@ -475,6 +763,11 @@ impl Index {
     pub fn pretty(&self) -> Pretty {
         Pretty { index: self }
     }
+
+    /// Returns the number of terms.
+    pub fn query_length(&self) -> u8 {
+        self.query_len
+    }
 }
 
 impl FromIterator<(Intersection, Cost, Score)> for Index {
@@ -501,7 +794,7 @@ impl FromIterator<(Intersection, Cost, Score)> for Index {
 }
 
 /// Describes intersection as given at the program input.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntersectionInput {
     /// Intersection mask.
     pub intersection: Intersection,
@@ -548,6 +841,94 @@ mod test {
     use proptest::prelude::*;
     use rstest::{fixture, rstest};
     use OptimizeMethod::{BruteForce, Exact, Graph, GraphGreedy, Greedy};
+
+    fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> {
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn test_school_unified_district_downey() {
+        let intersections: Vec<IntersectionInput> = serde_json::from_str(
+            r#"[
+            {"cost": 2423488, "intersection": 1, "max_score": 5.653356075286865},
+            {"cost": 935805, "intersection": 5, "max_score": 8.899179458618164},
+            {"cost": 72728, "intersection": 9, "max_score": 14.799269676208496},
+            {"cost": 67622, "intersection": 2, "max_score": 12.529928207397461},
+            {"cost": 7660019, "intersection": 4, "max_score": 3.252655029296875},
+            {"cost": 133514, "intersection": 12, "max_score": 12.412330627441406},
+            {"cost": 395014, "intersection": 8, "max_score": 9.169288635253906}
+            ]"#,
+        )
+        .unwrap();
+        let index = Index::from_iter(intersections.into_iter());
+        assert_eq!(
+            &sorted(index.optimize_bigram(Score(16.043301))),
+            &[Intersection(2), Intersection(9)]
+        );
+    }
+
+    #[test]
+    fn test_buses_pittsburgh() {
+        let intersections: Vec<IntersectionInput> = serde_json::from_str(
+            r#"[
+            {"cost": 46969, "intersection": 1, "max_score": 13.052966117858888},
+            {"cost": 1435, "intersection": 3, "max_score": 19.0411434173584},
+            {"cost": 500508, "intersection": 2, "max_score": 8.719024658203125}
+            ]"#,
+        )
+        .unwrap();
+        let index = Index::from_iter(intersections.into_iter());
+        assert!(&index.optimize_bigram(Score(10.110200)) == &[Intersection(1)]);
+    }
+
+    #[test]
+    fn test_50_cent() {
+        let intersections: Vec<IntersectionInput> = serde_json::from_str(
+            r#"[
+            {"cost": 7150457, "intersection": 1, "max_score": 3.408390998840332},
+            {"cost": 319771, "intersection": 3, "max_score": 11.532732963562012},
+            {"cost": 677700, "intersection": 2, "max_score": 8.134215354919434}
+            ]"#,
+        )
+        .unwrap();
+        let index = Index::from_iter(intersections.into_iter());
+        assert_eq!(&index.optimize_bigram(Score(10.919300)), &[Intersection(3)]);
+    }
+
+    #[test]
+    fn test_party_slumber_bears() {
+        let intersections: Vec<IntersectionInput> = serde_json::from_str(
+            r#"[
+            {"cost": 1994671, "intersection": 1, "max_score": 6.039915561676025},
+            {"cost": 11059, "intersection": 5, "max_score": 18.312904357910156},
+            {"cost": 4606787, "intersection": 2, "max_score": 4.34684419631958},
+            {"cost": 20953, "intersection": 6, "max_score": 17.45214080810547},
+            {"cost": 46983, "intersection": 4, "max_score": 13.127897262573242}
+            ]"#,
+        )
+        .unwrap();
+        let index = Index::from_iter(intersections.into_iter());
+        assert_eq!(
+            &index.optimize_bigram(Score(14.999400)),
+            &[Intersection(5), Intersection(6)]
+        );
+    }
+
+    #[test]
+    fn test_wine_food_pairing() {
+        let intersections: Vec<IntersectionInput> = serde_json::from_str(
+            r#"[
+            {"cost": 5569437, "intersection": 1, "max_score": 3.946219682693481},
+            {"cost": 651602,  "intersection": 5, "max_score": 10.726018905639648},
+            {"cost": 1118862, "intersection": 2, "max_score": 7.167963981628418},
+            {"cost": 1334056, "intersection": 4, "max_score": 6.829254150390625}
+            ]"#,
+        )
+        .unwrap();
+        let index = Index::from_iter(intersections.into_iter());
+        assert_eq!(&index.optimize_bigram(Score(15.075000)), &[Intersection(5)]);
+    }
 
     //#[test]
     fn test_new_index() {

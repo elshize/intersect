@@ -74,7 +74,11 @@ fn main(args: Args) -> Result<(), Error> {
             index.scale_costs(index.query_len as f32);
         }
         let now = std::time::Instant::now();
-        let mut optimal = index.optimize(threshold, args.method);
+        //let mut optimal = if index.query_length() < 8 {
+        //    index.optimize_or_unigram(threshold, OptimizeMethod::Exact)
+        //} else {
+        let mut optimal = index.optimize_or_unigram(threshold, args.method);
+        //};
         let elapsed = now.elapsed().as_micros() as u64;
         optimal.sort();
         if args.time {
