@@ -19,7 +19,7 @@ use std::iter::Iterator;
 use std::ops::Deref;
 
 mod power_set;
-pub use power_set::{power_set_iter, PowerSetIter};
+pub use power_set::{power_set_iter, power_set_iter_enum, PowerSetIter};
 
 mod term_bitset;
 pub use term_bitset::{Intersection, ResultClass, TermMask};
@@ -28,7 +28,7 @@ mod index;
 pub use index::{Index, IntersectionInput, OptimizeMethod};
 
 mod set_cover;
-pub use set_cover::set_cover;
+pub use set_cover::{BruteForceSetCover, FirstSeenSetCover, GreedySetCover, WeightedSetCover};
 
 pub mod graph;
 pub use graph::Graph;

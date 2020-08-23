@@ -7,6 +7,12 @@ pub struct SubsetIter<'a, T, U> {
     slice: &'a [T],
 }
 
+#[derive(Clone, Copy)]
+pub struct SubsetIterEnum<'a, T, U> {
+    mask: U,
+    slice: &'a [T],
+}
+
 /// The type alias for the return type of
 /// [`power_set_iter`](fn.power_set_iter.html) function.
 pub type PowerSetIter<'a, T> = std::iter::Map<
@@ -44,6 +50,36 @@ where
     }
 }
 
+impl<'a, T, U> SubsetIterEnum<'a, T, U> {
+    pub fn from(slice: &'a [T], mask: U) -> Self {
+        SubsetIterEnum { mask, slice }
+    }
+    pub fn from_tuple((slice, mask): (&'a [T], U)) -> Self {
+        Self::from(slice, mask)
+    }
+}
+
+impl<'a, T, U> Iterator for SubsetIterEnum<'a, T, U>
+where
+    U: Unsigned + FromPrimitive + ToPrimitive + PrimInt + Zero + One + std::ops::BitAndAssign,
+{
+    type Item = (usize, &'a T);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.mask == U::zero() {
+            None
+        } else {
+            let idx = self.mask.trailing_zeros() as usize;
+            if idx >= self.slice.len() {
+                self.mask = U::zero();
+                None
+            } else {
+                self.mask &= !(U::one() << idx);
+                Some((idx, &self.slice[idx]))
+            }
+        }
+    }
+}
+
 /// Returns a power set iterator.
 ///
 /// The `Item` type of this iterator is a `SubsetIter` instance that iterates over elements
@@ -71,11 +107,19 @@ where
 ///     ]
 /// );
 /// ```
-pub fn power_set_iter<T>(slice: &[T]) -> PowerSetIter<T> {
+pub fn power_set_iter<T>(slice: &[T]) -> impl Iterator<Item = SubsetIter<'_, T, u64>> {
     let len = slice.len().to_u8().expect("Slice too long.");
     std::iter::repeat(slice)
         .zip(0..2_u64.pow(u32::from(len)))
         .map(SubsetIter::from_tuple)
+}
+
+/// Same as `power_set_iter` but each element of a subset comes with its index in `slice`.
+pub fn power_set_iter_enum<T>(slice: &[T]) -> impl Iterator<Item = SubsetIterEnum<'_, T, u64>> {
+    let len = slice.len().to_u8().expect("Slice too long.");
+    std::iter::repeat(slice)
+        .zip(0..2_u64.pow(u32::from(len)))
+        .map(SubsetIterEnum::from_tuple)
 }
 
 #[cfg(test)]
