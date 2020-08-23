@@ -1,6 +1,6 @@
 use crate::graph::Graph;
 use crate::power_set::power_set_iter;
-use crate::set_cover::{greedy_set_cover, set_cover};
+use crate::set_cover::{BruteForceSetCover, GreedyNSetCover, GreedySetCover, WeightedSetCover};
 use crate::{Cost, Intersection, ResultClass, Score, TermMask, MAX_LIST_COUNT};
 use failure::{bail, format_err, Error};
 use itertools::Itertools;
@@ -23,22 +23,24 @@ impl Candidates {
         self.leaves.len() + self.uncovered_classes.len()
     }
 
-    fn subsets(&self, index: &Index) -> Vec<(usize, Vec<usize>, f32)> {
+    fn subsets(&self, index: &Index) -> Vec<(Vec<usize>, f32)> {
+        let elements: Vec<_> = self
+            .leaves
+            .iter()
+            .map(|&Intersection(leaf)| leaf)
+            .chain(
+                self.uncovered_classes
+                    .iter()
+                    .map(|&ResultClass(class)| class),
+            )
+            .collect();
         self.all
             .iter()
-            .enumerate()
-            .filter_map(|(set_idx, &candidate)| {
-                let set: Vec<usize> = self
-                    .leaves
+            .map(|&candidate| {
+                let set: Vec<usize> = elements
                     .iter()
-                    .map(|&Intersection(leaf)| leaf)
-                    .chain(
-                        self.uncovered_classes
-                            .iter()
-                            .map(|&ResultClass(class)| class),
-                    )
                     .enumerate()
-                    .filter_map(|(idx, elem)| {
+                    .filter_map(|(idx, &elem)| {
                         if candidate.covers(ResultClass(elem)) {
                             Some(idx)
                         } else {
@@ -48,21 +50,23 @@ impl Candidates {
                     .collect();
                 let cand_idx: usize = candidate.into();
                 let Cost(cost) = index.costs[cand_idx];
-                if set.is_empty() {
-                    None
-                } else {
-                    Some((set_idx, set, cost))
-                }
+                (set, cost)
             })
             .collect()
     }
 
     fn solve(&self, index: &Index) -> Vec<usize> {
-        set_cover(self.cardinality(), &self.subsets(index))
+        BruteForceSetCover::solve(self.cardinality(), &self.subsets(index))
     }
 
     fn solve_greedy(&self, index: &Index) -> Vec<usize> {
-        greedy_set_cover(self.cardinality(), &self.subsets(index))
+        let subsets = &self.subsets(index);
+        GreedySetCover::solve(self.cardinality(), subsets)
+    }
+
+    fn solve_greedy_2(&self, index: &Index) -> Vec<usize> {
+        let subsets = &self.subsets(index);
+        GreedyNSetCover::solve(self.cardinality(), subsets)
     }
 }
 
@@ -123,6 +127,7 @@ pub enum OptimizeMethod {
     /// This is essentially a greedy approximation algorithm for weighted set cover.
     /// The result is approximate but this method is very fast.
     Greedy,
+    Greedy2,
     /// Another approximate solution that has potential of being more accurate
     /// than `Greedy` (to be determined) but not as fast.
     /// Still, is reasonably fast if yields better results.
@@ -178,7 +183,7 @@ impl Index {
             }
             degrees.push(intersections);
         }
-        for class in (0..max_class).map(ResultClass) {
+        for class in (0..=max_class).map(ResultClass) {
             // NOTE: This is clearly not as good as we can get because we always
             // use single terms to infer missing scores. However, using the best
             // of our knowledge might turn out costly here (to be determined).
@@ -232,14 +237,9 @@ impl Index {
     pub fn optimize(&mut self, threshold: Score, method: OptimizeMethod) -> Vec<Intersection> {
         match method {
             OptimizeMethod::BruteForce => self.optimize_brute_force(threshold),
-            OptimizeMethod::Exact => {
-                if self.query_length() < 7 {
-                    self.optimize_exact(threshold)
-                } else {
-                    self.optimize(threshold, OptimizeMethod::Bigram)
-                }
-            }
+            OptimizeMethod::Exact => self.optimize_exact(threshold),
             OptimizeMethod::Greedy => self.optimize_greedy(threshold),
+            OptimizeMethod::Greedy2 => self.optimize_greedy_2(threshold),
             OptimizeMethod::Graph => self.optimize_graph(threshold),
             OptimizeMethod::GraphGreedy => self.optimize_graph_greedy(threshold),
             OptimizeMethod::Unigram => self.optimize_unigram(threshold),
@@ -261,13 +261,16 @@ impl Index {
         match method {
             OptimizeMethod::Unigram | OptimizeMethod::Bigram => self.optimize(threshold, method),
             OptimizeMethod::Greedy
+            | OptimizeMethod::Greedy2
             | OptimizeMethod::BruteForce
             | OptimizeMethod::Exact
             | OptimizeMethod::Graph
             | OptimizeMethod::GraphGreedy => {
                 let approx = self.optimize(threshold, method);
+                let approx_cost = self.full_cost(&approx);
                 let unigram = self.optimize_unigram(threshold);
-                if self.full_cost(&unigram) < self.full_cost(&approx) {
+                let unigram_cost = self.full_cost(&unigram);
+                if unigram_cost <= approx_cost {
                     unigram
                 } else {
                     approx
@@ -287,6 +290,9 @@ impl Index {
                 break;
             }
             num_non_essential += 1;
+        }
+        if num_non_essential == unigrams.len() {
+            num_non_essential -= 1;
         }
         unigrams[num_non_essential..].iter().copied().collect()
     }
@@ -558,6 +564,15 @@ impl Index {
             .collect()
     }
 
+    fn optimize_greedy_2(&self, threshold: Score) -> Vec<Intersection> {
+        let candidates = self.candidates(threshold);
+        let solution = candidates.solve_greedy_2(&self);
+        solution
+            .into_iter()
+            .map(|set| candidates.all[set])
+            .collect()
+    }
+
     fn optimize_graph(&mut self, threshold: Score) -> Vec<Intersection> {
         let Candidates {
             all: candidates,
@@ -797,9 +812,9 @@ impl FromIterator<(Intersection, Cost, Score)> for Index {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntersectionInput {
     /// Intersection mask.
-    pub intersection: Intersection,
+    pub mask: Intersection,
     /// Intersection cost, e.g., number of postings.
-    pub cost: Cost,
+    pub length: Cost,
     /// Maximum score of a document in the intersection.
     pub max_score: Score,
 }
@@ -809,27 +824,24 @@ impl FromIterator<IntersectionInput> for Index {
         let mut query_len = 0_u8;
         let mut posting_lists: Vec<Vec<(Intersection, Cost, Score)>> = Vec::new();
         for IntersectionInput {
-            intersection,
-            cost,
+            mask,
+            length,
             max_score,
         } in iter
         {
-            let len = intersection
+            let len = mask
                 .0
                 .trailing_zeros()
                 .to_u8()
                 .expect("Unable to cast u32 to u8")
                 + 1;
             query_len = std::cmp::max(query_len, len);
-            let level = intersection.0.count_ones() as usize;
+            let level = mask.0.count_ones() as usize;
             if posting_lists.len() < level {
                 posting_lists.resize_with(level, Default::default);
             }
-            posting_lists[level.checked_sub(1).expect("Intersection cannot be 0")].push((
-                intersection,
-                cost,
-                max_score,
-            ));
+            posting_lists[level.checked_sub(1).expect("Intersection cannot be 0")]
+                .push((mask, length, max_score));
         }
         Self::new(query_len, &posting_lists).expect("Unable to create index")
     }
@@ -910,6 +922,10 @@ mod test {
         .unwrap();
         let index = Index::from_iter(intersections.into_iter());
         assert_eq!(
+            &index.optimize_exact(Score(14.999400)),
+            &[Intersection(5), Intersection(6)]
+        );
+        assert_eq!(
             &index.optimize_bigram(Score(14.999400)),
             &[Intersection(5), Intersection(6)]
         );
@@ -927,10 +943,11 @@ mod test {
         )
         .unwrap();
         let index = Index::from_iter(intersections.into_iter());
+        assert_eq!(&index.optimize_exact(Score(15.075000)), &[Intersection(5)]);
         assert_eq!(&index.optimize_bigram(Score(15.075000)), &[Intersection(5)]);
     }
 
-    //#[test]
+    #[test]
     fn test_new_index() {
         let index = Index::new(0, &[]).unwrap();
         assert!(index.degrees.is_empty());
@@ -1059,6 +1076,7 @@ mod test {
         expected.sort();
         candidates.all.sort();
         assert_eq!(candidates.all, expected);
+        assert_eq!(candidates.leaves, vec![Intersection(6), Intersection(18)]);
         assert_eq!(
             candidates.uncovered_classes,
             // ACE + ACDE are not covered by the leaves.
@@ -1125,6 +1143,18 @@ mod test {
         assert_eq!(exact_opt, expected);
         assert_eq!(greedy_opt, expected);
         assert_eq!(graph_opt, expected);
+    }
+
+    #[test]
+    fn test_drivers_education_honolulu_hawaii() {
+        let intersections: Vec<IntersectionInput> = serde_json::from_str(
+            r#"[{"cost":1468706,"intersection":1,"max_score":6.639634609222412},{"cost":338950,"intersection":3,"max_score":9.69923973083496},{"cost":47357,"intersection":5,"max_score":13.511035919189451},{"cost":10676,"intersection":9,"max_score":15.92648696899414},{"cost":719578,"intersection":17,"max_score":7.662487983703613},{"cost":8267086,"intersection":2,"max_score":3.081190586090088},{"cost":241985,"intersection":6,"max_score":10.240900039672852},{"cost":61706,"intersection":10,"max_score":12.95743179321289},{"cost":3456044,"intersection":18,"max_score":4.114166259765625},{"cost":1062881,"intersection":4,"max_score":7.269174098968506},{"cost":114242,"intersection":12,"max_score":17.30234718322754},{"cost":435092,"intersection":20,"max_score":8.251961708068848},{"cost":238947,"intersection":8,"max_score":10.131380081176758},{"cost":120172,"intersection":24,"max_score":11.09640407562256},{"cost":18089189,"intersection":16,"max_score":1.090119481086731}]"#,
+        ).unwrap();
+        assert_eq!(
+            Index::from_iter(intersections.clone().into_iter())
+                .optimize(Score(17.60650062561035), BruteForce),
+            Index::from_iter(intersections.into_iter()).optimize(Score(17.60650062561035), Greedy)
+        )
     }
 
     #[rstest]

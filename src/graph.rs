@@ -593,8 +593,8 @@ mod test {
             assert_eq!(u32::from(Degree::try_from(d).unwrap().0), d);
         }
         #[test]
-        fn add_to_degree(d in 0_u8..100, x in 0_u8..100) {
-            assert_eq!(Degree(d as TermMask) + x as TermMask, Degree((d + x) as TermMask));
+        fn add_to_degree(d in 0_u16..100, x in 0_u16..100) {
+            assert_eq!(Degree(d) + x, Degree(d + x));
         }
     }
 }

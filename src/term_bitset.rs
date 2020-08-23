@@ -10,7 +10,7 @@ use std::str::FromStr;
 ///
 /// In this representation, n-th bit represents the n-th term, and
 /// is equal to 1 if it's present, and 0 if it's missing.
-pub type TermMask = u8;
+pub type TermMask = u16;
 
 fn term_mask_from_query(query: &Query, term_subset: &[Term]) -> Result<TermMask, Error> {
     let mut mask: TermMask = 0;
@@ -41,8 +41,14 @@ fn term_mask_from_str(index: &str) -> Result<TermMask, Error> {
 /// For example, in a 3-term query, the class `100` includes all documents containing
 /// **only** the first term, while the class `111` includes the documents containing
 /// all three terms.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ResultClass(pub TermMask);
+
+impl fmt::Debug for ResultClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Class({}|{:08b})", self.0, self.0)
+    }
+}
 
 impl FromStr for ResultClass {
     type Err = Error;
@@ -133,7 +139,7 @@ pub struct Intersection(pub TermMask);
 
 impl fmt::Debug for Intersection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Intersection({:08b})", self.0)
+        write!(f, "Intersection({}|{:08b})", self.0, self.0)
     }
 }
 
